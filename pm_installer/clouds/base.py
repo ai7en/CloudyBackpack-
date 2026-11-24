@@ -1,4 +1,5 @@
 """Абстрактный интерфейс облака. Новое облако = новый подкласс CloudProvider + @register."""
+import logging
 import os
 import re
 import threading
@@ -10,7 +11,10 @@ from typing import Callable, ClassVar, List, Optional, Tuple
 
 import requests
 
+from ..diagnostics import describe_network_error
 from ..errors import (CancelledError, InvalidLinkError, NetworkError, wrap_oserror)
+
+log = logging.getLogger("pm_installer.net")
 
 ProgressCB = Callable[[int, Optional[int]], None]   # (скачано байт, всего или None)
 UA = "Mozilla/5.0 (X11; Linux aarch64) PortMasterInstaller/1.0"
@@ -76,8 +80,8 @@ class CloudProvider(ABC):
         try:
             r = self.session.request(method, url, **kw)
         except (requests.ConnectionError, requests.Timeout) as e:
-            raise NetworkError("Нет соединения с сетью или сервер не отвечает. "
-                               "Проверьте Wi-Fi и попробуйте снова.") from e
+            log.warning("Сетевая ошибка %s %s: %r", method, url, e)
+            raise NetworkError(describe_network_error(e, url)) from e
         except requests.RequestException as e:
             raise InvalidLinkError(f"Некорректная ссылка: {e}") from e
         if r.status_code == 404:
@@ -124,7 +128,8 @@ class CloudProvider(ABC):
                             if progress:
                                 progress(done, total)
             except requests.RequestException as e:
-                raise NetworkError("Загрузка оборвалась: проблемы с сетью.") from e
+                log.warning("Обрыв загрузки: %r", e)
+                raise NetworkError("Загрузка оборвалась: " + describe_network_error(e, getattr(resp, "url", ""))) from e
             except OSError as e:
                 raise wrap_oserror(e, part) from e
             if total and done < total and not resp.headers.get("Content-Encoding"):

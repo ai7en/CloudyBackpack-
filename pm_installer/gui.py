@@ -11,6 +11,7 @@ from typing import Callable, List, Optional
 
 from .clouds import available_providers
 from .constants import APP_NAME, SCREEN_H as H, SCREEN_W as W
+from .diagnostics import DEFAULT_TARGETS, Check, origin_of, run_checks
 from .errors import CancelledError, InstallerError
 from .firmware import describe_targets, detect, env_cfw_name
 from .installer import ConflictAction, PortInstaller
@@ -75,7 +76,7 @@ class MessageScreen(Screen):
 
 
 class MainMenu(Screen):
-    ITEMS = ["Установить порт из облака", "Настройки", "Пути установки", "Выход"]
+    ITEMS = ["Установить порт из облака", "Настройки", "Проверка сети", "Пути установки", "Выход"]
 
     def __init__(self):
         self.sel = 0
@@ -103,6 +104,8 @@ class MainMenu(Screen):
             elif self.sel == 1:
                 gui.push(SettingsScreen())
             elif self.sel == 2:
+                gui.push(NetCheckScreen(gui))
+            elif self.sel == 3:
                 gui.push(PathsScreen())
             else:
                 gui.running = False
@@ -240,6 +243,53 @@ class TextInput(Screen):
             gui.key_cap(20 + c * (sw + 4), top + len(self.CHARS) * (ch + 4), sw, ch, name,
                         (self.r, self.c) == (len(self.CHARS), c))
         gui.footer("A ввод  X удалить  Y регистр  Start готово  B отмена")
+
+
+class NetCheckScreen(Screen):
+    """Проверка сети в фоновом потоке: время, сертификаты, DNS, TCP, HTTPS."""
+    COLORS = {"ok": OKC, "warn": WARN, "fail": ERR}
+    MARKS = {"ok": "OK", "warn": "!", "fail": "ОШИБКА"}
+
+    def __init__(self, gui: "Gui"):
+        self.checks: List[Check] = []
+        self.done = False
+        self.off = 0
+        targets = list(DEFAULT_TARGETS)
+        extra = origin_of(gui.settings.url)
+        if extra and extra not in targets:
+            targets.append(extra)
+        threading.Thread(target=self._run, args=(targets,), daemon=True).start()
+
+    def _run(self, targets):
+        try:
+            run_checks(targets, on_progress=self._progress)
+        except Exception as e:  # noqa: BLE001
+            log.exception("Сбой диагностики сети")
+            self._progress(self.checks + [Check("Диагностика", "fail", str(e))])
+        self.done = True
+
+    def _progress(self, checks):
+        self.checks = checks
+
+    def handle(self, act, gui):
+        n = len(self.checks)
+        if act == "down":
+            self.off = min(self.off + 1, max(0, n - 7))
+        elif act == "up":
+            self.off = max(self.off - 1, 0)
+        elif act in ("ok", "back"):
+            gui.pop()
+
+    def draw(self, gui):
+        gui.header("Проверка сети" + ("" if self.done else "…"))
+        y = 62
+        for c in self.checks[self.off:self.off + 7]:
+            gui.text(f"[{self.MARKS[c.status]}] {c.name}", 20, y, gui.f_s, self.COLORS[c.status], maxw=W - 40)
+            gui.text(c.detail, 40, y + 20, gui.f_s, DIM, maxw=W - 60)
+            y += 48
+        if not self.checks:
+            gui.text("Проверяю…", 20, y)
+        gui.footer("↑↓ прокрутка   A/B — назад")
 
 
 class PathsScreen(Screen):

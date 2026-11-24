@@ -9,7 +9,7 @@
 
 ## Установка на консоль
 
-1. `python3 build_port.py` → `dist/cloudportinstaller.zip`.
+1. `python3 build_port.py` → `dist/cloudportinstaller.zip` (готовый архив уже лежит рядом).
 2. Распакуйте архив на SD-карту консоли: `Cloud Port Installer.sh` и папку `cloudportinstaller/`
    в папки портов вашей прошивки (то же, что делает сам установщик):
 
@@ -25,6 +25,10 @@
 3. Обновите список игр / перезапустите интерфейс — в разделе Ports появится «Cloud Port Installer».
 4. Нужен установленный PortMaster, хотя бы раз запущенный (он распаковывает `pylibs`), и рантайм
    `python_3.11` (PortMaster докачает его сам при запуске порта — нужен интернет).
+
+Если пишет про сеть — откройте в меню **«Проверка сети»**: она показывает дату/время, сертификаты и по шагам
+DNS → соединение → HTTPS для Яндекс.Диска, Google Drive и вашей ссылки. Частые причины: Wi-Fi не подключён
+или неверная дата на консоли (из-за неё HTTPS не проходит).
 
 Если что-то не запустилось — пришлите `cloudportinstaller/log.txt`.
 
@@ -49,7 +53,8 @@ portmaster-installer/
 │   ├── archives.py            # detect_format() по сигнатуре, extract(): zip / py7zr / rarfile + CLI-резерв
 │   ├── layout.py              # analyze(): ищет .sh и папку порта → PortLayout
 │   ├── installer.py           # PortInstaller, ConflictAction, InstallReport
-│   ├── gui.py                 # Gui и экраны (MainMenu, SettingsScreen, TextInput, InstallScreen, PathsScreen)
+│   ├── diagnostics.py         # describe_network_error(), run_checks() — экран «Проверка сети»
+│   ├── gui.py                 # Gui и экраны (MainMenu, SettingsScreen, TextInput, InstallScreen, NetCheckScreen, PathsScreen)
 │   ├── backends/              # pygame_backend.py (ПК), sdl2_backend.py (PySDL2 — как у PortMaster)
 │   └── clouds/
 │       ├── __init__.py        # @register, get_provider(), available_providers()
@@ -58,7 +63,7 @@ portmaster-installer/
 │       ├── gdrive.py          # GoogleDrive — file/d/<ID> напрямую, папки через gdown
 │       ├── mailru.py          # MailRuCloud — публичная ссылка на файл
 │       └── direct.py          # DirectLink — любая http(s)-ссылка (запасной вариант)
-└── tests/                     # test_core.py, test_gui.py, test_port.py — 61 проверка
+└── tests/                     # test_core.py, test_gui.py, test_port.py, test_diagnostics.py — 72 проверки
 ```
 
 ## Ключевые классы
@@ -150,7 +155,7 @@ pip install -r requirements.txt          # только для запуска н
 
 ## Что проверено, а что нет
 
-Проверено в песочнице (61 тест): раскладка по трём прошивкам, конфликты (4 режима), автоопределение
+Проверено в песочнице (72 теста): раскладка по трём прошивкам, конфликты (4 режима), автоопределение
 (включая подсказку `CFW_NAME` от PortMaster), пользовательские профили, безопасность zip, загрузка по http
 с отменой/404/обрывом, разбор ссылок и ответов трёх облаков **на подставных ответах**, логика GUI на
 фиктивном бэкенде, PySDL2-бэкенд на заглушке модуля `sdl2`, скрипт запуска целиком с подделанным

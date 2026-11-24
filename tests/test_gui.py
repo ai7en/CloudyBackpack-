@@ -91,7 +91,7 @@ class TestGui(unittest.TestCase):
         self.assertTrue(self.store.load().swap_ab)
 
     def test_paths_and_quit(self):
-        self.press("down", "down", "ok")
+        self.press("down", "down", "down", "ok")
         self.assertIsInstance(self.g.top, G.PathsScreen)
         self.press("back")
         self.press("quit")
@@ -147,7 +147,26 @@ class TestGui(unittest.TestCase):
                 break
             time.sleep(0.05)
         self.assertEqual(scr.state, "error")
-        self.assertIn("сет", scr.error)
+        self.assertIn("отклонил соединение", scr.error)
+        self.assertIn("127.0.0.1", scr.error)
+
+    def test_netcheck_screen(self):
+        from pm_installer.diagnostics import Check
+        fake = lambda targets, on_progress=None: [on_progress([Check("Дата и время", "ok", "x"),
+                                                                Check("DNS a", "fail", "boom")])] and []
+        with mock.patch.object(G, "run_checks", fake):
+            self.press("down", "down", "ok")
+            scr = self.g.top
+            self.assertIsInstance(scr, G.NetCheckScreen)
+            for _ in range(40):
+                self.g.step()
+                if scr.done:
+                    break
+                time.sleep(0.05)
+        self.assertTrue(scr.done)
+        self.assertEqual([c.status for c in scr.checks], ["ok", "fail"])
+        self.press("down", "up", "back")
+        self.assertIsInstance(self.g.top, G.MainMenu)
 
 
 # ------------------------------------------------------------------ заглушка sdl2
