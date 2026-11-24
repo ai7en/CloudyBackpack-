@@ -1,0 +1,25 @@
+{
+  "version": 2,
+  "name": "cloudportinstaller.zip",
+  "items": [
+    "Cloud Port Installer.sh",
+    "cloudportinstaller"
+  ],
+  "items_opt": null,
+  "attr": {
+    "title": "Cloud Port Installer",
+    "desc": "Installs PortMaster ports from archives in Yandex.Disk, Google Drive, Mail.ru Cloud or direct links.",
+    "inst": "Needs PortMaster with the python_3.11 runtime. Open it, set the link in Settings, then install.",
+    "genres": [
+      "tool"
+    ],
+    "porter": [],
+    "image": {},
+    "rtr": true,
+    "runtime": "python_3.11.squashfs",
+    "reqs": [],
+    "arch": [
+      "aarch64"
+    ]
+  }
+}

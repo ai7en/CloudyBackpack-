@@ -1,0 +1,13 @@
+<?xml version="1.0"?>
+<gameList>
+  <game>
+    <path>./Cloud Port Installer.sh</path>
+    <name>Cloud Port Installer</name>
+    <desc>Installs PortMaster ports from archives (.zip, .7z, .rar) in Yandex.Disk, Google Drive, Mail.ru Cloud or direct links. Lays files out for muOS, ROCKNIX or KNULLI.</desc>
+    <releasedate>20261124T000000</releasedate>
+    <developer></developer>
+    <publisher></publisher>
+    <genre>Tool</genre>
+    <image>./cloudportinstaller/screenshot.png</image>
+  </game>
+</gameList>

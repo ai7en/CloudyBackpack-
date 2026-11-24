@@ -1,0 +1,13 @@
+# Только для запуска на ПК / отладки. На консоли всё это берётся из PortMaster
+# (рантайм python_3.11 + PortMaster/pylibs: PySDL2, requests, certifi).
+
+requests>=2.28
+
+# Графика: любой один из двух
+pygame>=2.1
+PySDL2>=0.9.16     # + системные SDL2 и SDL2_ttf
+
+# Необязательно
+py7zr>=0.20        # .7z (иначе нужна утилита 7z)
+rarfile>=4.1       # .rar (+ unrar/bsdtar/7z)
+gdown>=5.0         # только для ПАПОК Google Drive

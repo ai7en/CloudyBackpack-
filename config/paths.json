@@ -1,0 +1,32 @@
+{
+  "_comment": "Словарь путей по прошивкам. Свои устройства/прошивки добавляйте в data/paths.user.json (та же схема) — этот файл трогать не нужно.",
+  "firmwares": {
+    "muos": {
+      "label": "muOS",
+      "detect": {
+        "os_release": ["muos", "mustard"],
+        "markers": ["/opt/muos", "/mnt/mmc/MUOS"]
+      },
+      "port_dirs": ["/mnt/mmc/ports", "/mmc/ports"],
+      "script_dirs": ["/mnt/mmc/ROMS/Ports"]
+    },
+    "rocknix": {
+      "label": "ROCKNIX",
+      "detect": {
+        "os_release": ["rocknix"],
+        "markers": ["/storage/.config"]
+      },
+      "port_dirs": ["/roms/ports"],
+      "script_dirs": ["/roms/ports"]
+    },
+    "knulli": {
+      "label": "KNULLI",
+      "detect": {
+        "os_release": ["knulli", "batocera"],
+        "markers": ["/userdata/system"]
+      },
+      "port_dirs": ["/userdata/roms/ports", "/SHARE/roms/ports"],
+      "script_dirs": ["/userdata/roms/ports", "/SHARE/roms/ports"]
+    }
+  }
+}
