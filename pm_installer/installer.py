@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
 from .archives import extract
-from .clouds import CloudProvider, RemoteFile, get_provider
+from .clouds import CloudProvider, RemoteFile, get_provider, normalize_url
 from .constants import is_archive_name
 from .errors import (CancelledError, ConflictAbort, InstallerError, InvalidLinkError,
                      wrap_oserror)
@@ -100,7 +100,7 @@ class PortInstaller:
     # ------------------------------------------------------------ облако
 
     def list_remote(self, url: Optional[str] = None) -> Tuple[CloudProvider, List[RemoteFile]]:
-        url = (self.settings.url if url is None else url).strip()
+        url = normalize_url(self.settings.url if url is None else url)
         provider = get_provider(url, self.settings.cloud, self.session)
         log.info("Облако: %s, ссылка: %s", provider.key, url)
         self._progress("list", -1, "Чтение ссылки…")

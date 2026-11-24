@@ -407,3 +407,12 @@ class TestEndToEndHttp(Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NormalizeUrl(unittest.TestCase):
+    def test_adds_scheme(self):
+        from pm_installer.clouds import normalize_url, get_provider
+        self.assertEqual(normalize_url("disk.yandex.ru/d/AbC"), "https://disk.yandex.ru/d/AbC")
+        self.assertEqual(normalize_url(" http://x.y/z "), "http://x.y/z")
+        self.assertEqual(normalize_url("abc"), "abc")
+        self.assertEqual(get_provider("disk.yandex.ru/d/AbC").key, "yandex")

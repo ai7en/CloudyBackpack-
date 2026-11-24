@@ -17,8 +17,16 @@ def available_providers() -> List[Tuple[str, str]]:
     return [(k, c.label) for k, c in _REGISTRY.items()]
 
 
-def get_provider(url: str, kind: str = "auto", session=None) -> CloudProvider:
+def normalize_url(url: str) -> str:
+    """Добавляет https://, если схема не указана (disk.yandex.ru/d/XXX → https://disk.yandex.ru/d/XXX)."""
     url = (url or "").strip()
+    if url and "://" not in url and "." in url.split("/")[0] and " " not in url:
+        return "https://" + url.lstrip("/")
+    return url
+
+
+def get_provider(url: str, kind: str = "auto", session=None) -> CloudProvider:
+    url = normalize_url(url)
     if not url:
         raise InvalidLinkError("Ссылка не задана. Укажите её в настройках.")
     if kind != "auto":
@@ -35,4 +43,4 @@ def get_provider(url: str, kind: str = "auto", session=None) -> CloudProvider:
 # Импорт после определения register(); direct — последним (запасной вариант для http(s)-ссылок)
 from . import yandex, gdrive, mailru, direct  # noqa: E402,F401
 
-__all__ = ["CloudProvider", "RemoteFile", "register", "available_providers", "get_provider"]
+__all__ = ["normalize_url", "CloudProvider", "RemoteFile", "register", "available_providers", "get_provider"]
