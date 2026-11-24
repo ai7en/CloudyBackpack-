@@ -47,8 +47,8 @@ class TestLauncherScript(unittest.TestCase):
         self.assertLess(self.text.index("mount -o loop"), run)
         self.assertGreater(self.text.rindex("umount"), run)
 
-    def test_runs_with_fake_portmaster(self):
-        """Скрипт целиком, с поддельным PortMaster: проверяем порядок действий и переменные окружения."""
+    def _run_launcher(self, mount_body='echo "MOUNT $*"', mounts_line=None, make_py_home=True):
+        """Скрипт целиком, с поддельным PortMaster. Возвращает (CompletedProcess, log, tmp, pyhome)."""
         tmp = Path(tempfile.mkdtemp(prefix="pmsh_"))
         self.addCleanup(shutil.rmtree, tmp, True)
         ctl = tmp / "PortMaster"
@@ -59,34 +59,71 @@ class TestLauncherScript(unittest.TestCase):
             'pm_message(){ echo "PM_MESSAGE $*"; }\npm_finish(){ echo PM_FINISH; }\n')
         fake_bin = tmp / "bin"
         fake_bin.mkdir()
-        for name, body in (("mount", 'echo "MOUNT $*"'), ("umount", 'echo "UMOUNT $*"'),
-                           ("python3", 'echo "PY args=$* HOME=$PM_INSTALLER_HOME PAD=$SDL_GAMECONTROLLERCONFIG PP=$PYTHONPATH"')):
+        pyhome = tmp / "pyhome"
+        pybody = 'echo "PY args=$* HOME=$PM_INSTALLER_HOME PAD=$SDL_GAMECONTROLLERCONFIG PP=$PYTHONPATH PH=$PYTHONHOME"'
+        for name, body in (("mount", mount_body), ("umount", 'echo "UMOUNT $*"')):
             f = fake_bin / name
             f.write_text("#!/bin/sh\n" + body + "\n")
             f.chmod(0o755)
-        # папка порта рядом со скриптом (запасной путь GAMEDIR)
+        if make_py_home:   # «смонтированный» рантайм: mount-заглушка его не создаёт, поэтому кладём заранее
+            (pyhome / "bin").mkdir(parents=True)
+            (pyhome / "lib" / "python3.11").mkdir(parents=True)
+            py = pyhome / "bin" / "python3"
+            py.write_text("#!/bin/sh\n" + pybody + "\n")
+            py.chmod(0o755)
         pkg = tmp / "pkg"
         (pkg / "cloudportinstaller").mkdir(parents=True)
         shutil.copy(SCRIPT, pkg / SCRIPT.name)
         (pkg / "cloudportinstaller" / "main.py").write_text("")
-        sandbox = tmp / "sandbox_tmp"
-        sandbox.mkdir()
-        # PYTHONHOME=/tmp/python в скрипте жёстко прописан, поэтому mount/umount подменены заглушками
         env = {"PATH": f"{fake_bin}:/usr/bin:/bin", "HOME": str(tmp), "XDG_DATA_HOME": str(tmp),
-               "PM_CAN_MOUNT": "Y"}
+               "PM_CAN_MOUNT": "Y", "PM_PYHOME": str(tmp / ("pyhome" if make_py_home else "nopy"))}
+        if mounts_line is not None:
+            mf = tmp / "mounts"
+            mf.write_text(mounts_line.replace("@PY@", str(pyhome)) + "\n")
+            env["PM_MOUNTS"] = str(mf)
         r = subprocess.run(["bash", str(pkg / SCRIPT.name)], capture_output=True, text=True, env=env,
                            cwd=str(tmp), timeout=60)
-        out = r.stdout + r.stderr
         log = (pkg / "cloudportinstaller" / "log.txt").read_text("utf-8")
+        return r, log, tmp, pyhome
+
+    def test_runs_with_fake_portmaster(self):
+        r, log, tmp, _ = self._run_launcher()
+        out = r.stdout + r.stderr
+        pkg = tmp / "pkg"
         self.assertEqual(r.returncode, 0, out)
         self.assertIn("GET_CONTROLS", out)          # get_controls вызывается до перенаправления в log.txt
         for line in ("MOUNT -o loop", "PY args=main.py", "PAD=PAD", "PM_FINISH"):
             self.assertIn(line, log, line)
         self.assertIn(str(pkg / "cloudportinstaller" / "data"), log)
-        self.assertIn(f"{ctl}/pylibs", log)
+        self.assertIn(f"{tmp / 'PortMaster'}/pylibs", log)
         self.assertLess(log.index("MOUNT -o loop"), log.index("PY args"))
         self.assertLess(log.index("PY args"), log.rindex("UMOUNT"))
         self.assertLess(log.rindex("UMOUNT"), log.index("PM_FINISH"))
+
+    def test_busy_loop_without_python_fails_cleanly(self):
+        """mount падает «busy», рабочего python нигде нет: аккуратный отказ, а не системный python."""
+        r, log, _, _ = self._run_launcher(
+            mount_body='echo "mount: already mounted or mount point busy" >&2; exit 32',
+            mounts_line="", make_py_home=False)
+        self.assertEqual(r.returncode, 1, log)
+        self.assertIn("ОШИБКА: рантайм python не смонтирован", log)
+        self.assertNotIn("PY args", log)
+
+    def test_busy_loop_reuses_mount_found_elsewhere(self):
+        """Как на консоли: mount падает «busy», а рантайм уже смонтирован в другой папке — берём его."""
+        other = Path(tempfile.mkdtemp(prefix="pmsh_other_"))
+        self.addCleanup(shutil.rmtree, other, True)
+        (other / "bin").mkdir()
+        (other / "lib" / "python3.11").mkdir(parents=True)
+        py = other / "bin" / "python3"
+        py.write_text('#!/bin/sh\necho "PY args=$* PH=$PYTHONHOME"\n')
+        py.chmod(0o755)
+        r, log, _, _ = self._run_launcher(
+            mount_body='echo "mount: busy" >&2; exit 32',
+            mounts_line=f"/dev/loop3 {other} squashfs ro 0 0", make_py_home=False)
+        self.assertEqual(r.returncode, 0, log)
+        self.assertIn(f"PY args=main.py PH={other}", log)
+        self.assertIn("Использую уже смонтированный python", log)
 
 
 class TestPackage(unittest.TestCase):
