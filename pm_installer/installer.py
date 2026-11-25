@@ -116,6 +116,10 @@ class PortInstaller:
             if choose is None:
                 raise InvalidLinkError("В папке несколько архивов — выберите нужный.")
             files = choose(files)
+        return self.install_remote(provider, files)
+
+    def install_remote(self, provider: CloudProvider, files: List[RemoteFile]) -> List[InstallReport]:
+        """Скачивает и устанавливает выбранные файлы (список уже показан пользователю)."""
         reports = []
         dl_dir = self.temp_root / "download"
         for rf in files:

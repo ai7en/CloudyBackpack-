@@ -3,6 +3,7 @@
 Действия: up/down/left/right, ok (A), back (B), x (удалить), y (Shift), start (Готово).
 Если A и B на вашей консоли перепутаны — «Настройки → Кнопки A/B».
 """
+import dataclasses
 import logging
 import os
 import threading
@@ -14,8 +15,9 @@ from .constants import APP_NAME, SCREEN_H as H, SCREEN_W as W
 from .diagnostics import DEFAULT_TARGETS, Check, origin_of, run_checks
 from .errors import CancelledError, InstallerError
 from .firmware import describe_targets, detect, env_cfw_name
+from . import manager as mgr
 from .installer import ConflictAction, PortInstaller
-from .settings import CONFLICT_LABELS, CONFLICT_POLICIES
+from .settings import CONFLICT_LABELS, CONFLICT_POLICIES, cloud_title
 
 log = logging.getLogger("pm_installer.gui")
 
@@ -76,7 +78,7 @@ class MessageScreen(Screen):
 
 
 class MainMenu(Screen):
-    ITEMS = ["Установить порт из облака", "Настройки", "Проверка сети", "Пути установки", "Выход"]
+    ITEMS = ["Облака", "Установленные порты", "Настройки", "Проверка сети", "Пути установки", "Выход"]
 
     def __init__(self):
         self.sel = 0
@@ -96,16 +98,14 @@ class MainMenu(Screen):
             gui.running = False
         elif act == "ok":
             if self.sel == 0:
-                if not gui.settings.url:
-                    gui.push(MessageScreen("Нет ссылки", ["Сначала укажите ссылку на облако",
-                                                         "в разделе «Настройки»."], WARN))
-                else:
-                    gui.push(InstallScreen(gui))
+                gui.push(CloudsScreen())
             elif self.sel == 1:
-                gui.push(SettingsScreen())
+                gui.push(ManagerScreen(gui))
             elif self.sel == 2:
-                gui.push(NetCheckScreen(gui))
+                gui.push(SettingsScreen())
             elif self.sel == 3:
+                gui.push(NetCheckScreen(gui))
+            elif self.sel == 4:
                 gui.push(PathsScreen())
             else:
                 gui.running = False
@@ -118,10 +118,9 @@ class MainMenu(Screen):
 
 
 class SettingsScreen(Screen):
-    ROWS = [("url", "Ссылка на облако"), ("cloud", "Тип облака"), ("firmware", "Прошивка"),
-            ("temp_dir", "Временная папка"), ("conflict_policy", "При конфликте имён"),
-            ("swap_ab", "Кнопки A/B")]
-    TEXT_ROWS = ("url", "temp_dir")
+    ROWS = [("firmware", "Прошивка"), ("temp_dir", "Временная папка"),
+            ("conflict_policy", "При конфликте имён"), ("swap_ab", "Кнопки A/B")]
+    TEXT_ROWS = ("temp_dir",)
 
     def __init__(self):
         self.sel = 0
@@ -326,7 +325,8 @@ class InstallScreen(Screen):
     CONFLICT_OPTS = [("Перезаписать", ConflictAction.OVERWRITE), ("Пропустить", ConflictAction.SKIP),
                      ("Резервная копия", ConflictAction.BACKUP), ("Прервать", ConflictAction.ABORT)]
 
-    def __init__(self, gui: "Gui"):
+    def __init__(self, gui: "Gui", provider=None, files=None):
+        self.provider, self.files = provider, files
         self.state = "running"
         self.stage, self.frac, self.msg = "", -1.0, "Запуск…"
         self.lines: List[str] = []
@@ -368,7 +368,11 @@ class InstallScreen(Screen):
 
     def _work(self):
         try:
-            for rep in self.installer.install(choose=self._choose):
+            if self.files is not None:     # список выбран на экране облака
+                reports = self.installer.install_remote(self.provider, self.files)
+            else:
+                reports = self.installer.install(choose=self._choose)
+            for rep in reports:
                 self.lines += rep.summary() + [""]
             self.state = "done"
         except CancelledError:
@@ -429,6 +433,366 @@ class InstallScreen(Screen):
         gui.outline(ACC, 30, 90, W - 60, 300, 2)
         gui.text(d["title"], 46, 104, maxw=W - 92)
         gui.rows([(o, "") for o in d["options"]], d["sel"], y0=146, rh=38, x=46, w=W - 92, max_rows=6)
+
+
+class Confirm(Screen):
+    """Полноэкранное подтверждение. По умолчанию выбрано «Нет»."""
+
+    def __init__(self, title: str, lines: List[str], on_yes: Callable[[], None], yes_label="Да, удалить"):
+        self.title, self.lines, self.on_yes, self.yes_label = title, lines, on_yes, yes_label
+        self.sel = 0
+
+    def handle(self, act, gui):
+        if act in ("up", "down", "left", "right"):
+            self.sel = 1 - self.sel
+        elif act == "back":
+            gui.pop()
+        elif act == "ok":
+            gui.pop()
+            if self.sel == 1:
+                self.on_yes()
+
+    def draw(self, gui):
+        gui.header(self.title)
+        y = 70
+        for ln in self.lines:
+            for part in gui.wrap(ln, gui.f_m, W - 40):
+                gui.text(part, 20, y, color=FG)
+                y += 26
+        gui.rows([("Нет", ""), (self.yes_label, "")], self.sel, y0=max(y + 20, 250), rh=44)
+        gui.footer("↑↓ выбор   A — подтвердить   B — отмена")
+
+
+class CloudsScreen(Screen):
+    """Список сохранённых облаков."""
+
+    def __init__(self):
+        self.sel = 0
+
+    @staticmethod
+    def _type_label(entry):
+        c = entry.get("cloud") or "auto"
+        return "Авто" if c == "auto" else dict(available_providers()).get(c, c)
+
+    def handle(self, act, gui):
+        clouds = gui.settings.clouds
+        n = len(clouds) + 1
+        self.sel = min(self.sel, n - 1)
+        self.sel = _move(self.sel, act, n)
+        if act == "back":
+            gui.pop()
+        elif act == "ok":
+            if self.sel == len(clouds):
+                gui.push(CloudEditScreen(None))
+            else:
+                gui.push(BrowseScreen(gui, clouds[self.sel]))
+        elif act == "y" and self.sel < len(clouds):
+            gui.push(CloudEditScreen(self.sel))
+        elif act == "x" and self.sel < len(clouds):
+            entry = clouds[self.sel]
+            gui.push(Confirm("Удалить облако?", [cloud_title(entry), entry["url"]],
+                             lambda i=self.sel: self._remove(gui, i)))
+
+    def _remove(self, gui, idx):
+        if 0 <= idx < len(gui.settings.clouds):
+            del gui.settings.clouds[idx]
+            _save(gui)
+            self.sel = max(0, min(self.sel, len(gui.settings.clouds)))
+
+    def draw(self, gui):
+        gui.header("Облака")
+        clouds = gui.settings.clouds
+        n = len(clouds) + 1
+        self.sel = min(self.sel, n - 1)
+
+        def item(i, x, y, w):
+            if i == len(clouds):
+                gui.text("+ Добавить облако", x, y + 12, color=ACC)
+                return
+            e = clouds[i]
+            gui.text(cloud_title(e), x, y + 3, maxw=w)
+            gui.text(f"{self._type_label(e)} · {e['url']}", x, y + 29, gui.f_s, DIM, maxw=w)
+        if not clouds:
+            gui.text("Облаков пока нет. Добавьте ссылку на папку", 20, 62, gui.f_s, DIM)
+        gui.list_view(n, self.sel, 84 if not clouds else 62, 56, item)
+        gui.footer("A открыть   Y изменить   X удалить   B назад")
+
+
+class CloudEditScreen(Screen):
+    """Название / ссылка / тип облака. Сохраняется при выходе, если ссылка не пустая."""
+    ROWS = [("name", "Название"), ("url", "Ссылка"), ("cloud", "Тип облака")]
+
+    def __init__(self, index: Optional[int]):
+        self.index = index
+        self.draft = {"name": "", "url": "", "cloud": "auto"}
+        self.loaded = False
+        self.sel = 1 if index is None else 0
+
+    def on_show(self, gui):
+        if not self.loaded:
+            self.loaded = True
+            if self.index is not None and self.index < len(gui.settings.clouds):
+                self.draft = dict(gui.settings.clouds[self.index])
+
+    def _commit(self, gui):
+        d = {k: (v or "").strip() for k, v in self.draft.items()}
+        if not d["url"]:
+            return
+        if self.index is None:
+            gui.settings.clouds.append(d)
+        elif self.index < len(gui.settings.clouds):
+            gui.settings.clouds[self.index] = d
+        _save(gui)
+
+    def handle(self, act, gui):
+        self.sel = _move(self.sel, act, len(self.ROWS))
+        key, title = self.ROWS[self.sel]
+        if act in ("back", "start"):
+            self._commit(gui)
+            gui.pop()
+        elif key != "cloud" and act == "ok":
+            gui.push(TextInput(title, self.draft.get(key, ""),
+                               lambda v, k=key: self.draft.__setitem__(k, v.strip())))
+        elif key == "cloud" and act in ("left", "right", "ok"):
+            opts = ["auto"] + [k for k, _ in available_providers()]
+            cur = self.draft.get("cloud") or "auto"
+            i = (opts.index(cur) if cur in opts else 0) + (-1 if act == "left" else 1)
+            self.draft["cloud"] = opts[i % len(opts)]
+
+    def draw(self, gui):
+        gui.header("Изменить облако" if self.index is not None else "Новое облако")
+        vals = {"name": self.draft.get("name") or "(по адресу ссылки)",
+                "url": self.draft.get("url") or "(не задана)",
+                "cloud": CloudsScreen._type_label(self.draft)}
+        gui.rows([(t, vals[k]) for k, t in self.ROWS], self.sel, y0=60, rh=56, two_line=True)
+        gui.text("Для Яндекс.Диска, Google Drive и Mail.ru тип можно оставить «Авто».", 20, 240, gui.f_s, DIM, maxw=W - 40)
+        gui.footer("A ввод   ←→ тип   B/Start сохранить и назад")
+
+
+class BrowseScreen(Screen):
+    """Содержимое облака на весь экран: отметить архивы и установить."""
+
+    def __init__(self, gui: "Gui", entry: dict):
+        self.entry = dict(entry)
+        self.state = "loading"
+        self.files: list = []
+        self.marked: set = set()
+        self.sel = 0
+        self.error = ""
+        self.provider = None
+        self._token = 0
+        self._load(gui)
+
+    def _load(self, gui):
+        self._token += 1
+        token = self._token
+        self.state, self.error = "loading", ""
+        st = dataclasses.replace(gui.settings, url=self.entry["url"], cloud=self.entry.get("cloud") or "auto")
+        inst = PortInstaller(st, gui.profiles, root=gui.root, temp_default=gui.store.default_temp)
+
+        def work():
+            try:
+                provider, files = inst.list_remote()
+                if token != self._token:
+                    return
+                self.provider, self.files, self.marked, self.sel = provider, files, set(), 0
+                self.state = "ready"
+            except InstallerError as e:
+                log.error("Ошибка чтения облака: %s", e)
+                if token == self._token:
+                    self.error, self.state = str(e), "error"
+            except Exception as e:  # noqa: BLE001
+                log.exception("Непредвиденная ошибка чтения облака")
+                if token == self._token:
+                    self.error, self.state = f"Непредвиденная ошибка: {e}", "error"
+        threading.Thread(target=work, daemon=True).start()
+
+    def handle(self, act, gui):
+        if act == "back":
+            self._token += 1
+            gui.pop()
+            return
+        if self.state == "error":
+            if act == "ok":
+                self._load(gui)
+            return
+        if self.state != "ready":
+            return
+        n = len(self.files)
+        self.sel = _move(self.sel, act, n)
+        if act == "x":
+            self.marked ^= {self.sel}
+        elif act == "y":
+            self.marked = set() if len(self.marked) == n else set(range(n))
+        elif act in ("ok", "start"):
+            chosen = [self.files[i] for i in sorted(self.marked)] or [self.files[self.sel]]
+            gui.push(InstallScreen(gui, self.provider, chosen))
+
+    def draw(self, gui):
+        gui.header(cloud_title(self.entry))
+        if self.state == "loading":
+            gui.text("Читаю список файлов…", 20, 80)
+            gui.bar(20, 120, W - 40, 22, -1)
+            gui.footer("B — назад")
+        elif self.state == "error":
+            y = 80
+            for part in gui.wrap(self.error, gui.f_m, W - 40):
+                gui.text(part, 20, y, color=ERR)
+                y += 26
+            gui.footer("A — повторить   B — назад")
+        else:
+            n = len(self.files)
+            total = sum(f.size or 0 for f in self.files)
+            gui.text(f"Архивов: {n} · {mgr.format_size(total)} · отмечено: {len(self.marked)}",
+                     20, 58, gui.f_s, DIM, maxw=W - 40)
+
+            def item(i, x, y, w):
+                f = self.files[i]
+                mark = "[x]" if i in self.marked else "[ ]"
+                size = mgr.format_size(f.size) if f.size else ""
+                sw = gui.be.text_size(gui.f_s, size)[0] if size else 0
+                gui.text(f"{mark} {f.meta.get('display') or f.name or '(без имени)'}", x, y + 8,
+                         color=OKC if i in self.marked else FG, maxw=w - sw - 12)
+                if size:
+                    gui.text(size, x + w - sw, y + 11, gui.f_s, DIM)
+            gui.list_view(n, self.sel, 84, 40, item)
+            gui.footer("A установить   X отметить   Y все   B назад")
+
+
+class ManagerScreen(Screen):
+    """Установленные на устройстве порты: что есть (.sh / папка), размер, дата, удаление."""
+    SORTS = [("по имени", lambda p: p.name.lower()),
+             ("по размеру", lambda p: -(p.size or -1)),
+             ("по дате", lambda p: -p.mtime)]
+
+    def __init__(self, gui: "Gui"):
+        self.state = "loading"
+        self.ports: List[mgr.InstalledPort] = []
+        self.sel = 0
+        self.sort = 0
+        self.error = ""
+        self.profile = None
+        self.fw_label = ""
+        self.root = gui.root
+        self.pending: Optional[tuple] = None     # (заголовок, строки, цвет) — показать из основного потока
+        threading.Thread(target=self._scan, args=(gui,), daemon=True).start()
+
+    def _scan(self, gui):
+        try:
+            key = PortInstaller(gui.settings, gui.profiles, root=gui.root).firmware_key()
+            self.profile = gui.profiles[key]
+            self.fw_label = self.profile.label
+            self.ports = mgr.scan(self.profile, gui.root)
+            self.state = "ready"
+        except InstallerError as e:
+            self.error, self.state = str(e), "error"
+            return
+        except Exception as e:  # noqa: BLE001
+            log.exception("Сбой просмотра портов")
+            self.error, self.state = f"Не удалось прочитать порты: {e}", "error"
+            return
+        self._resort()
+        for p in list(self.ports):         # размеры считаются по очереди, список уже виден
+            mgr.compute_size(p)
+
+    def _resort(self):
+        self.ports.sort(key=self.SORTS[self.sort][1])
+
+    def _delete(self, port):
+        def work():
+            try:
+                freed = mgr.delete_port(port, self.profile, self.root)
+                self.ports = [p for p in self.ports if p is not port]
+                self.pending = ("Удалено", [f"«{port.name}» удалён.", f"Освобождено: {mgr.format_size(freed)}"], OKC)
+            except InstallerError as e:
+                self.pending = ("Не удалось удалить", [str(e)], ERR)
+            except Exception as e:  # noqa: BLE001
+                log.exception("Сбой удаления")
+                self.pending = ("Не удалось удалить", [str(e)], ERR)
+            self.state = "ready"
+        self.state = "busy"
+        threading.Thread(target=work, daemon=True).start()
+
+    def tick(self, gui):
+        if self.pending and gui.top is self:
+            t, lines, color = self.pending
+            self.pending = None
+            self.sel = max(0, min(self.sel, len(self.ports) - 1))
+            gui.push(MessageScreen(t, lines, color))
+
+    def handle(self, act, gui):
+        if act == "back":
+            if self.state != "busy":
+                gui.pop()
+            return
+        if self.state != "ready" or not self.ports:
+            return
+        self.sel = _move(self.sel, act, len(self.ports))
+        port = self.ports[self.sel]
+        if act == "y":
+            self.sort = (self.sort + 1) % len(self.SORTS)
+            self._resort()
+            self.sel = 0
+        elif act == "ok":
+            lines = [f"Тип: {port.kind}",
+                     f"Скрипт: {port.script or '—'}", f"Папка: {port.folder or '—'}",
+                     f"Размер: {mgr.format_size(port.size)}", f"Дата: {mgr.format_date(port.mtime)}"]
+            gui.push(MessageScreen(port.name, lines))
+        elif act == "x":
+            if port.protected:
+                gui.push(MessageScreen("Нельзя удалить", ["Это само приложение — оно нужно для установки портов."], WARN))
+                return
+            parts = []
+            if port.script:
+                parts.append("файл .sh")
+            if port.folder:
+                parts.append(f"папка ({mgr.format_size(port.size)})")
+            gui.push(Confirm("Удалить порт?", [port.name, "Будет удалено: " + " и ".join(parts) + "."],
+                             lambda p=port: self._delete(p)))
+
+    def draw(self, gui):
+        gui.header("Установленные порты")
+        if self.state == "loading":
+            gui.text("Ищу порты…", 20, 80)
+            gui.footer("B — назад")
+            return
+        if self.state == "error":
+            y = 80
+            for part in gui.wrap(self.error, gui.f_m, W - 40):
+                gui.text(part, 20, y, color=ERR)
+                y += 26
+            gui.footer("B — назад")
+            return
+        known = [p.size for p in self.ports if p.size is not None]
+        total = mgr.format_size(sum(known)) + ("" if len(known) == len(self.ports) else "…")
+        gui.text(f"{self.fw_label} · портов: {len(self.ports)} · занято: {total} · {self.SORTS[self.sort][0]}",
+                 20, 58, gui.f_s, DIM, maxw=W - 40)
+        if not self.ports:
+            gui.text("Установленных портов не найдено.", 20, 100)
+        kind_color = {"sh + папка": OKC}
+
+        def item(i, x, y, w):
+            p = self.ports[i]
+            size = mgr.format_size(p.size)
+            sw = gui.be.text_size(gui.f_m, size)[0]
+            gui.text(p.name, x, y + 3, maxw=w - sw - 12)
+            gui.text(size, x + w - sw, y + 3, color=DIM if p.size is None else FG)
+            gui.text(f"{p.kind} · {mgr.format_date(p.mtime)}" + (" · это приложение" if p.protected else ""),
+                     x, y + 29, gui.f_s, DIM if p.protected else kind_color.get(p.kind, WARN), maxw=w)
+        gui.list_view(len(self.ports), self.sel, 84, 52, item)
+        if self.state == "busy":
+            gui.rect(PANEL, 120, 190, W - 240, 80)
+            gui.outline(ACC, 120, 190, W - 240, 80, 2)
+            gui.text("Удаление…", 150, 218)
+        gui.footer("A подробно   X удалить   Y сортировка   B назад")
+
+
+def _save(gui):
+    try:
+        gui.store.save(gui.settings)
+    except InstallerError as e:
+        gui.push(MessageScreen("Не удалось сохранить", [str(e)], ERR))
+
 
 
 # ====================================================================== приложение
@@ -534,6 +898,22 @@ class Gui:
                 self.text(value, x, y + 23, self.f_m, FG, maxw=w)
             else:
                 self.text(label, x, y + 8, maxw=w)
+
+    def list_view(self, n, sel, y0, rh, draw_item, x=20, w=W - 40):
+        """Прокручиваемый список: подсветка выбранной строки, полоса прокрутки; draw_item(i, x, y, w)."""
+        vis = max(1, (H - 34 - y0) // rh)
+        top = max(0, min(sel - vis + 1, n - vis))
+        for i in range(top, min(n, top + vis)):
+            y = y0 + (i - top) * rh
+            if i == sel:
+                self.rect(PANEL, x - 8, y, w + 16, rh - 4)
+                self.rect(ACC, x - 8, y, 4, rh - 4)
+            draw_item(i, x, y, w - 10 if n > vis else w)
+        if n > vis:
+            track = vis * rh - 4
+            bar_h = max(16, track * vis // n)
+            self.rect(PANEL, W - 10, y0, 4, track)
+            self.rect(DIM, W - 10, y0 + (track - bar_h) * top // max(1, n - vis), 4, bar_h)
 
     def key_cap(self, x, y, w, h, label, active):
         self.rect(ACC if active else PANEL, x, y, w, h)

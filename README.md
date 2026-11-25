@@ -53,9 +53,10 @@ portmaster-installer/
 │   ├── archives.py            # detect_format() по сигнатуре, extract(): zip / py7zr / rarfile + CLI-резерв
 │   ├── layout.py              # analyze(): ищет .sh и папку порта → PortLayout
 │   ├── installer.py           # PortInstaller, ConflictAction, InstallReport
+│   ├── manager.py             # менеджер установленных портов: scan(), compute_size(), delete_port()
 │   ├── httpfallback.py        # CurlSession: HTTPS через curl, если в Python нет модуля ssl
 │   ├── diagnostics.py         # describe_network_error(), run_checks() — экран «Проверка сети»
-│   ├── gui.py                 # Gui и экраны (MainMenu, SettingsScreen, TextInput, InstallScreen, NetCheckScreen, PathsScreen)
+│   ├── gui.py                 # Gui и экраны (MainMenu, CloudsScreen, CloudEditScreen, BrowseScreen, ManagerScreen, Confirm, SettingsScreen, TextInput, InstallScreen, NetCheckScreen, PathsScreen)
 │   ├── backends/              # pygame_backend.py (ПК), sdl2_backend.py (PySDL2 — как у PortMaster)
 │   └── clouds/
 │       ├── __init__.py        # @register, get_provider(), available_providers()
@@ -64,7 +65,7 @@ portmaster-installer/
 │       ├── gdrive.py          # GoogleDrive — file/d/<ID> напрямую, папки через gdown
 │       ├── mailru.py          # MailRuCloud — публичная ссылка на файл
 │       └── direct.py          # DirectLink — любая http(s)-ссылка (запасной вариант)
-└── tests/                     # test_core.py, test_gui.py, test_port.py, test_diagnostics.py — 87 проверок
+└── tests/                     # test_core.py, test_gui.py, test_port.py, test_diagnostics.py — 112 проверок
 ```
 
 ## Ключевые классы
@@ -125,15 +126,16 @@ portmaster-installer/
 
 ```json
 {
-  "url": "https://disk.yandex.ru/d/XXXXXXXX",
-  "cloud": "auto",
+  "clouds": [
+    {"name": "Мои порты", "url": "https://disk.yandex.ru/d/XXXXXXXX", "cloud": "auto"}
+  ],
   "firmware": "auto",
   "temp_dir": "",
   "conflict_policy": "ask"
 }
 ```
 
-`cloud`: `auto | yandex | gdrive | mailru | direct`; `firmware`: `auto | muos | rocknix | knulli | …ваши`;
+`clouds[].cloud`: `auto | yandex | gdrive | mailru | direct` (облака добавляются в меню «Облака»; старые `url`/`cloud` переносятся в список сами); `firmware`: `auto | muos | rocknix | knulli | …ваши`;
 `conflict_policy`: `ask | overwrite | skip | backup`. Пустой `temp_dir` = `data/tmp` (на SD-карте:
 `/tmp` на консолях обычно в RAM и не вместит большой порт). Каталог данных меняется через `PM_INSTALLER_HOME`.
 Журнал: `data/logs/installer.log`.
@@ -156,7 +158,7 @@ pip install -r requirements.txt          # только для запуска н
 
 ## Что проверено, а что нет
 
-Проверено в песочнице (87 тестов): раскладка по трём прошивкам, конфликты (4 режима), автоопределение
+Проверено в песочнице (112 тестов): раскладка по трём прошивкам, конфликты (4 режима), автоопределение
 (включая подсказку `CFW_NAME` от PortMaster), пользовательские профили, безопасность zip, загрузка по http
 с отменой/404/обрывом, разбор ссылок и ответов трёх облаков **на подставных ответах**, логика GUI на
 фиктивном бэкенде, PySDL2-бэкенд на заглушке модуля `sdl2`, скрипт запуска целиком с подделанным

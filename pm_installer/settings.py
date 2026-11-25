@@ -2,9 +2,10 @@
 import json
 import logging
 import os
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
+from urllib.parse import urlparse
 
 from .errors import wrap_oserror
 
@@ -27,6 +28,7 @@ class Settings:
     temp_dir: str = ""              # "" = <data>/tmp (на SD-карте, не в RAM-tmpfs)
     conflict_policy: str = "ask"    # ask | overwrite | skip | backup
     swap_ab: bool = False           # поменять местами A и B на геймпаде
+    clouds: list = field(default_factory=list)   # [{"name": ..., "url": ..., "cloud": "auto|yandex|..."}]
 
     def normalize(self) -> "Settings":
         if self.conflict_policy not in CONFLICT_POLICIES:
@@ -35,7 +37,22 @@ class Settings:
         self.url = (self.url or "").strip()
         self.cloud = self.cloud or "auto"
         self.firmware = self.firmware or "auto"
+        clean = []
+        for c in self.clouds if isinstance(self.clouds, list) else []:
+            if isinstance(c, dict) and str(c.get("url", "")).strip():
+                clean.append({"name": str(c.get("name", "")).strip(), "url": str(c["url"]).strip(),
+                              "cloud": str(c.get("cloud") or "auto")})
+        self.clouds = clean
         return self
+
+
+def cloud_title(entry: dict) -> str:
+    """Название облака: заданное пользователем, иначе хост из ссылки."""
+    name = (entry.get("name") or "").strip()
+    if name:
+        return name
+    url = (entry.get("url") or "").strip()
+    return urlparse(url if "://" in url else "https://" + url).hostname or url or "Облако"
 
 
 def app_home() -> Path:
@@ -81,7 +98,10 @@ class SettingsStore:
                 pass
             return Settings()
         known = {f.name for f in fields(Settings)}
-        return Settings(**{k: v for k, v in data.items() if k in known}).normalize()
+        st = Settings(**{k: v for k, v in data.items() if k in known})
+        if "clouds" not in data and str(data.get("url", "")).strip():     # миграция: одна ссылка → список
+            st.clouds = [{"name": "", "url": data["url"], "cloud": data.get("cloud") or "auto"}]
+        return st.normalize()
 
     def save(self, s: Settings) -> None:
         s.normalize()

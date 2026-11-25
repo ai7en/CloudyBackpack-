@@ -68,21 +68,45 @@ class TestGui(unittest.TestCase):
         self.be.queue += list(acts)
         self.g.step()
 
-    def test_menu_settings_and_keyboard(self):
-        self.press("ok")                               # нет ссылки -> предупреждение
-        self.assertIsInstance(self.g.top, G.MessageScreen)
-        self.press("ok", "down", "ok")                 # назад, «Настройки»
-        self.assertIsInstance(self.g.top, G.SettingsScreen)
-        self.press("ok")                               # поле URL -> клавиатура
+    def test_add_cloud_via_keyboard_and_persist(self):
+        self.press("ok")                               # «Облака»
+        self.assertIsInstance(self.g.top, G.CloudsScreen)
+        self.press("ok")                               # «+ Добавить облако»
+        self.assertIsInstance(self.g.top, G.CloudEditScreen)
+        self.press("ok")                               # курсор сразу на «Ссылка» -> клавиатура
         self.assertIsInstance(self.g.top, G.TextInput)
-        self.press(*["text:" + c for c in "https://yadi.sk/d/Ab"], "y", "ok", "x", "start")
-        self.assertEqual(self.st.url, "https://yadi.sk/d/Ab")   # Shift+символ добавил «Q», X его стёр
-        self.assertEqual(self.store.load().url, self.st.url, "сохраняется в JSON")
+        self.press(*["text:" + c for c in "disk.yandex.ru/d/Ab"], "y", "ok", "x", "start")
+        self.press("back")                             # выход из редактора сохраняет облако
+        self.assertIsInstance(self.g.top, G.CloudsScreen)
+        self.assertEqual(len(self.st.clouds), 1)
+        self.assertEqual(self.st.clouds[0]["url"], "disk.yandex.ru/d/Ab")   # Shift+символ добавил «Q», X его стёр
+        self.assertEqual(self.store.load().clouds, self.st.clouds, "сохраняется в JSON")
         self.assertGreater(self.be.drawn, 0)
 
+    def test_empty_cloud_is_discarded_and_delete_needs_confirmation(self):
+        self.press("ok", "ok", "back")                 # новое облако без ссылки не сохраняется
+        self.assertEqual(self.st.clouds, [])
+        self.st.clouds = [{"name": "A", "url": "https://x/a", "cloud": "auto"}]
+        self.press("x")                                # подтверждение, по умолчанию «Нет»
+        self.assertIsInstance(self.g.top, G.Confirm)
+        self.press("ok")
+        self.assertEqual(len(self.st.clouds), 1)
+        self.press("x", "down", "ok")                  # «Да, удалить»
+        self.assertEqual(self.st.clouds, [])
+        self.assertEqual(self.store.load().clouds, [])
+
+    def test_edit_cloud_type_cycles(self):
+        self.st.clouds = [{"name": "A", "url": "https://x/a", "cloud": "auto"}]
+        self.press("ok", "y")                          # изменить
+        self.assertIsInstance(self.g.top, G.CloudEditScreen)
+        self.press("down", "down", "right")            # «Тип облака»
+        self.press("back")
+        self.assertNotEqual(self.st.clouds[0]["cloud"], "auto")
+        self.assertEqual(self.st.clouds[0]["url"], "https://x/a")
+
     def test_swap_ab_option(self):
-        self.press("down", "ok")                       # в настройки
-        for _ in range(5):
+        self.press("down", "down", "ok")               # в настройки
+        for _ in range(3):
             self.press("down")
         self.press("right")
         self.assertTrue(self.st.swap_ab)
@@ -91,7 +115,7 @@ class TestGui(unittest.TestCase):
         self.assertTrue(self.store.load().swap_ab)
 
     def test_paths_and_quit(self):
-        self.press("down", "down", "down", "ok")
+        self.press("down", "down", "down", "down", "ok")
         self.assertIsInstance(self.g.top, G.PathsScreen)
         self.press("back")
         self.press("quit")
@@ -101,6 +125,13 @@ class TestGui(unittest.TestCase):
         self.be.queue = ["quit"]
         self.g.run()
         self.assertTrue(self.be.closed)
+
+    def wait_browse(self, scr):
+        for _ in range(100):
+            self.g.step()
+            if scr.state != "loading":
+                return
+            time.sleep(0.05)
 
     def test_install_flow_with_conflict_dialog(self):
         port = self.tmp / "p.zip"
@@ -113,11 +144,17 @@ class TestGui(unittest.TestCase):
         threading.Thread(target=srv.serve_forever, daemon=True).start()
         self.addCleanup(srv.server_close)
         self.addCleanup(srv.shutdown)
-        self.st.url = f"http://127.0.0.1:{srv.server_address[1]}/p.zip"
+        self.st.clouds = [{"name": "Тест", "url": f"http://127.0.0.1:{srv.server_address[1]}/p.zip",
+                           "cloud": "direct"}]
         self.st.conflict_policy = "ask"
 
         def run_install():
-            self.press("ok")
+            self.press("ok")                            # открыть облако
+            browse = self.g.top
+            self.assertIsInstance(browse, G.BrowseScreen)
+            self.wait_browse(browse)
+            self.assertEqual(browse.state, "ready", browse.error)
+            self.press("ok")                            # установить выделенный архив
             scr = self.g.top
             self.assertIsInstance(scr, G.InstallScreen)
             for _ in range(200):
@@ -129,18 +166,22 @@ class TestGui(unittest.TestCase):
                 time.sleep(0.05)
             return scr
 
+        self.press("ok")                                # главное меню -> «Облака»
         s1 = run_install()
         self.assertEqual(s1.state, "done", s1.error)
-        self.press("ok")
+        self.press("ok", "back")                        # из установки в список облака и обратно к облакам
         s2 = run_install()
         self.assertEqual(s2.state, "done", s2.error)
         self.assertTrue(any("Пропущено" in ln for ln in s2.lines))
         self.assertTrue(Path(self.root + "/roms/ports/Game.sh").is_file())
 
     def test_install_error_is_shown(self):
-        self.st.url = "http://127.0.0.1:1/x.zip"
-        self.press("ok")
+        self.st.clouds = [{"name": "Мёртвое", "url": "http://127.0.0.1:1/x.zip", "cloud": "direct"}]
+        self.press("ok", "ok")
+        self.wait_browse(self.g.top)
+        self.press("ok")                                # установить
         scr = self.g.top
+        self.assertIsInstance(scr, G.InstallScreen)
         for _ in range(100):
             self.g.step()
             if scr.state != "running":
@@ -150,12 +191,52 @@ class TestGui(unittest.TestCase):
         self.assertIn("отклонил соединение", scr.error)
         self.assertIn("127.0.0.1", scr.error)
 
+    def test_browse_error_then_retry(self):
+        from pm_installer.errors import InvalidLinkError
+        fake_inst = mock.Mock()
+        fake_inst.list_remote.side_effect = InvalidLinkError("Ссылка не найдена (404)")
+        with mock.patch.object(G, "PortInstaller", return_value=fake_inst):
+            self.st.clouds = [{"name": "Мёртвое", "url": "https://x/y", "cloud": "auto"}]
+            self.press("ok", "ok")
+            scr = self.g.top
+            self.wait_browse(scr)
+            self.assertEqual(scr.state, "error")
+            self.assertIn("404", scr.error)
+            self.press("ok")                            # повторить
+            self.wait_browse(scr)
+            self.assertEqual(fake_inst.list_remote.call_count, 2)
+        self.press("back")
+        self.assertIsInstance(self.g.top, G.CloudsScreen)
+
+    def test_browse_lists_and_marks_several(self):
+        from pm_installer.clouds import RemoteFile
+        files = [RemoteFile(f"p{i}.zip", 1000 * i, {"folder": True, "display": f"d/p{i}.zip"}) for i in range(1, 4)]
+        fake_inst = mock.Mock()
+        fake_inst.list_remote.return_value = (mock.Mock(), files)
+        with mock.patch.object(G, "PortInstaller", return_value=fake_inst):
+            self.st.clouds = [{"name": "N", "url": "https://x/y", "cloud": "auto"}]
+            self.press("ok", "ok")
+            scr = self.g.top
+            self.wait_browse(scr)
+        self.assertEqual(scr.state, "ready")
+        self.press("x", "down", "x")                   # отметить 1-й и 2-й
+        self.assertEqual(scr.marked, {0, 1})
+        self.press("y")                                # все
+        self.assertEqual(scr.marked, {0, 1, 2})
+        self.press("y")                                # снять все
+        self.assertEqual(scr.marked, set())
+        self.press("x", "down", "down", "x")           # выделенная — 2-я; затем по кругу на 1-ю
+        with mock.patch.object(G, "InstallScreen") as inst_cls:
+            self.press("ok")
+        chosen = inst_cls.call_args[0][2]
+        self.assertEqual([f.name for f in chosen], ["p1.zip", "p2.zip"])
+
     def test_netcheck_screen(self):
         from pm_installer.diagnostics import Check
         fake = lambda targets, on_progress=None: [on_progress([Check("Дата и время", "ok", "x"),
                                                                 Check("DNS a", "fail", "boom")])] and []
         with mock.patch.object(G, "run_checks", fake):
-            self.press("down", "down", "ok")
+            self.press("down", "down", "down", "ok")
             scr = self.g.top
             self.assertIsInstance(scr, G.NetCheckScreen)
             for _ in range(40):

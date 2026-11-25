@@ -7,8 +7,8 @@
         "os_release": ["muos", "mustard"],
         "markers": ["/opt/muos", "/mnt/mmc/MUOS"]
       },
-      "port_dirs": ["/mnt/mmc/ports", "/mmc/ports"],
-      "script_dirs": ["/mnt/mmc/ROMS/Ports"]
+      "port_dirs": ["/mnt/mmc/ports", "/mmc/ports", "/mnt/sdcard/ports"],
+      "script_dirs": ["/mnt/mmc/ROMS/Ports", "/mnt/sdcard/ROMS/Ports"]
     },
     "rocknix": {
       "label": "ROCKNIX",
