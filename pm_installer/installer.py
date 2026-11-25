@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
 from .archives import extract
+from .manager import format_size
 from .clouds import CloudProvider, RemoteFile, get_provider, normalize_url
 from .constants import is_archive_name
 from .errors import (CancelledError, ConflictAbort, InstallerError, InvalidLinkError,
@@ -77,6 +78,16 @@ class PortInstaller:
 
     # ------------------------------------------------------------ вспомогательное
 
+    _batch = None        # (номер, всего) при установке нескольких архивов
+
+    def _title(self, text: str) -> str:
+        return f"[{self._batch[0]} из {self._batch[1]}] {text}" if self._batch and self._batch[1] > 1 else text
+
+    @staticmethod
+    def _clock(sec: float) -> str:
+        sec = max(0, int(sec))
+        return f"{sec // 60}:{sec % 60:02d}"
+
     def _progress(self, stage: str, frac: float, msg: str = "") -> None:
         if self._progress_cb:
             self._progress_cb(stage, frac, msg)
@@ -122,13 +133,23 @@ class PortInstaller:
         """Скачивает и устанавливает выбранные файлы (список уже показан пользователю)."""
         reports = []
         dl_dir = self.temp_root / "download"
-        for rf in files:
+        for n, rf in enumerate(files, 1):
             self._check_cancel()
+            self._batch = (n, len(files))
             label = rf.name or "архив"
 
-            def on_dl(done: int, total: Optional[int], _l=label):
-                frac = done / total if total else -1
-                self._progress("download", frac, f"Загрузка {_l}: {done // 1024 // 1024} МБ")
+            t0 = time.monotonic()
+
+            def on_dl(done: int, total: Optional[int], _l=label, _t0=t0):
+                speed = done / max(time.monotonic() - _t0, 0.001)
+                lines = [self._title(f"Загрузка {_l}")]
+                if total:
+                    eta = (total - done) / speed if speed > 0 else 0
+                    lines += [f"{format_size(done)} из {format_size(total)}",
+                              f"{format_size(int(speed))}/с · осталось {self._clock(eta)}"]
+                else:
+                    lines += [f"Скачано {format_size(done)}", f"{format_size(int(speed))}/с"]
+                self._progress("download", done / total if total else -1, "\n".join(lines))
 
             path = provider.download(rf, dl_dir, on_dl, self.cancel)
             try:
@@ -138,6 +159,7 @@ class PortInstaller:
                     path.unlink()
                 except OSError:
                     pass
+        self._batch = None
         return reports
 
     # ------------------------------------------------------------ установка архива
@@ -154,9 +176,19 @@ class PortInstaller:
         except OSError as e:
             raise wrap_oserror(e, self.temp_root) from e
         try:
-            self._progress("extract", -1, f"Распаковка {archive.name}…")
-            extract(archive, work, lambda f: self._progress("extract", f, f"Распаковка {archive.name}…"),
-                    self.cancel)
+            title = self._title(f"Распаковка {archive.name}")
+            self._progress("extract", -1, title + "\nПодготовка…")
+
+            def on_extract(ep):
+                lines = [title]
+                if ep.files_total:
+                    lines.append(f"Файлов: {ep.files_done} из {ep.files_total}")
+                if ep.current:
+                    lines.append(ep.current)
+                if ep.bytes_total:
+                    lines.append(f"{format_size(ep.bytes_done)} из {format_size(ep.bytes_total)}")
+                self._progress("extract", ep.frac, "\n".join(lines))
+            extract(archive, work, on_extract, self.cancel)
             self._check_cancel()
             layout = analyze(work)
             report.warnings += layout.warnings
@@ -168,7 +200,8 @@ class PortInstaller:
                     [(s, targets.script_dir, "файл") for s in layout.scripts]
             for i, (src, dst_dir, kind) in enumerate(items):
                 self._check_cancel()
-                self._progress("install", i / len(items), f"Копирование: {src.name}")
+                self._progress("install", i / len(items),
+                               f"{self._title('Копирование в папки порта')}\n{src.name}\n{kind}: {i + 1} из {len(items)}")
                 self._place(src, dst_dir, kind, report)
             self._progress("install", 1.0, "Готово")
         finally:

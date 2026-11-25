@@ -1,4 +1,4 @@
-"""Распаковка .zip (zipfile), .7z (py7zr), .rar (rarfile) с резервом на системные утилиты."""
+"""Распаковка .zip (zipfile), .7z (свой модуль на lzma → py7zr → утилиты), .rar (rarfile → утилиты)."""
 import logging
 import os
 import shutil
@@ -6,15 +6,16 @@ import stat
 import subprocess
 import threading
 import zipfile
+import zlib
 from pathlib import Path
 from typing import Callable, Optional
 
+from .extract_common import ExtractProgress, ProgressCB as Progress, Reporter, safe_target
 from .errors import (CancelledError, MissingDependencyError, UnsupportedArchiveError,
                      wrap_oserror)
 
 log = logging.getLogger("pm_installer.archives")
 
-Progress = Optional[Callable[[float], None]]
 
 _MAGIC = ((b"PK\x03\x04", "zip"), (b"PK\x05\x06", "zip"),
           (b"7z\xbc\xaf\x27\x1c", "7z"), (b"Rar!\x1a\x07", "rar"))
@@ -57,26 +58,49 @@ def extract(path: Path, dest: Path, progress: Progress = None,
 
 def _extract_zip(path, dest, progress, cancel):
     root = dest.resolve()
+    rep = Reporter(progress)
     try:
         with zipfile.ZipFile(path) as zf:
             infos = zf.infolist()
-            for i, info in enumerate(infos):
+            rep.p.files_total = sum(1 for i in infos if not i.is_dir())
+            rep.p.bytes_total = sum(i.file_size for i in infos)
+            rep(True)
+            for info in infos:
                 if cancel is not None and cancel.is_set():
                     raise CancelledError("Распаковка отменена.")
-                target = (root / info.filename).resolve()
-                if target != root and root not in target.parents:
-                    raise UnsupportedArchiveError(f"Небезопасный путь в архиве: {info.filename}")
+                target = safe_target(root, info.filename)
                 if info.flag_bits & 0x1:
                     raise UnsupportedArchiveError("Архив защищён паролем — такие архивы не поддерживаются.")
-                zf.extract(info, root)
+                if info.is_dir():
+                    target.mkdir(parents=True, exist_ok=True)
+                    continue
+                rep.p.current = info.filename
+                rep()
+                target.parent.mkdir(parents=True, exist_ok=True)
                 mode = info.external_attr >> 16
-                if info.create_system == 3 and mode and stat.S_ISREG(mode):
-                    os.chmod(target, stat.S_IMODE(mode) | 0o600)  # сохраняем +x у бинарников
-                if progress:
-                    progress((i + 1) / len(infos))
+                if info.create_system == 3 and mode and stat.S_ISLNK(mode):
+                    if target.is_symlink() or target.exists():
+                        target.unlink()
+                    os.symlink(zf.read(info).decode("utf-8", "replace"), target)
+                else:
+                    with zf.open(info) as src, open(target, "wb") as out:
+                        while True:
+                            if cancel is not None and cancel.is_set():
+                                raise CancelledError("Распаковка отменена.")
+                            chunk = src.read(256 * 1024)
+                            if not chunk:
+                                break
+                            out.write(chunk)
+                            rep.p.bytes_done += len(chunk)
+                            rep()
+                    if info.create_system == 3 and mode and stat.S_ISREG(mode):
+                        os.chmod(target, stat.S_IMODE(mode) | 0o600)  # сохраняем +x у бинарников
+                rep.p.files_done += 1
+                rep()
+            rep(True)
     except zipfile.BadZipFile as e:
         raise UnsupportedArchiveError("Архив .zip повреждён или не докачан.") from e
-    except (NotImplementedError, RuntimeError) as e:
+    except (NotImplementedError, RuntimeError, zlib.error, EOFError) as e:
         raise UnsupportedArchiveError(f"Не удалось распаковать .zip: {e}") from e
     except OSError as e:
         raise wrap_oserror(e, dest) from e
@@ -85,12 +109,21 @@ def _extract_zip(path, dest, progress, cancel):
 # ------------------------------------------------------------------ 7z
 
 def _extract_7z(path, dest, progress, cancel):
+    from .sevenzip import FeatureNotSupported, extract_7z
+    first: Optional[Exception] = None
+    try:                                   # 1) свой модуль на стандартном lzma — с подробным прогрессом
+        extract_7z(path, dest, progress, cancel)
+        return
+    except (FeatureNotSupported, MissingDependencyError) as e:
+        first = e
+        log.warning("Встроенный распаковщик .7z не справился (%s) — пробую py7zr и утилиты", e)
+        _clean_dir(dest)
     try:
         import py7zr
     except ImportError:
         py7zr = None
     err: Optional[Exception] = None
-    if py7zr is not None:
+    if py7zr is not None:                  # 2) py7zr
         try:
             with py7zr.SevenZipFile(path, "r") as z:
                 if z.needs_password():
@@ -105,11 +138,11 @@ def _extract_7z(path, dest, progress, cancel):
             err = e
             log.warning("py7zr не справился (%s) — пробую системные утилиты", e)
             _clean_dir(dest)
-    if _run_cli(_CLI_7Z, path, dest):
+    if _run_cli(_CLI_7Z, path, dest):      # 3) 7z / 7zz / 7za / bsdtar
         return
-    if py7zr is None:
-        raise MissingDependencyError("Для .7z нужна библиотека py7zr (pip install py7zr) или утилита 7z.")
-    raise UnsupportedArchiveError(f"Не удалось распаковать .7z: {err}")
+    if isinstance(first, MissingDependencyError) and err is None:
+        raise first
+    raise UnsupportedArchiveError(f"Не удалось распаковать .7z: {err or first}")
 
 
 # ------------------------------------------------------------------ rar

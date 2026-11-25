@@ -53,6 +53,8 @@ portmaster-installer/
 │   ├── archives.py            # detect_format() по сигнатуре, extract(): zip / py7zr / rarfile + CLI-резерв
 │   ├── layout.py              # analyze(): ищет .sh и папку порта → PortLayout
 │   ├── installer.py           # PortInstaller, ConflictAction, InstallReport
+│   ├── sevenzip.py            # распаковка .7z на чистом Python (stdlib lzma/zlib/bz2), потоково, с проверкой CRC
+│   ├── extract_common.py      # ExtractProgress, ограничитель частоты, safe_target (защита от zip-slip)
 │   ├── manager.py             # менеджер установленных портов: scan(), compute_size(), delete_port()
 │   ├── httpfallback.py        # CurlSession: HTTPS через curl, если в Python нет модуля ssl
 │   ├── diagnostics.py         # describe_network_error(), run_checks() — экран «Проверка сети»
@@ -65,7 +67,7 @@ portmaster-installer/
 │       ├── gdrive.py          # GoogleDrive — file/d/<ID> напрямую, папки через gdown
 │       ├── mailru.py          # MailRuCloud — публичная ссылка на файл
 │       └── direct.py          # DirectLink — любая http(s)-ссылка (запасной вариант)
-└── tests/                     # test_core.py, test_gui.py, test_port.py, test_diagnostics.py — 112 проверок
+└── tests/                     # test_core.py, test_gui.py, test_port.py, test_diagnostics.py — 144 проверки
 ```
 
 ## Ключевые классы
@@ -158,7 +160,7 @@ pip install -r requirements.txt          # только для запуска н
 
 ## Что проверено, а что нет
 
-Проверено в песочнице (112 тестов): раскладка по трём прошивкам, конфликты (4 режима), автоопределение
+Проверено в песочнице (144 теста): раскладка по трём прошивкам, конфликты (4 режима), автоопределение
 (включая подсказку `CFW_NAME` от PortMaster), пользовательские профили, безопасность zip, загрузка по http
 с отменой/404/обрывом, разбор ссылок и ответов трёх облаков **на подставных ответах**, логика GUI на
 фиктивном бэкенде, PySDL2-бэкенд на заглушке модуля `sdl2`, скрипт запуска целиком с подделанным
@@ -172,8 +174,11 @@ PortMaster (порядок: `control.txt` → `get_controls` → mount рант�
   вызовы PySDL2 написаны по документации и проверены только на заглушке;
 - реальные запросы к Яндекс.Диску, Google Drive и Mail.ru (Mail.ru — разбор страницы, может сломаться;
   папки Mail.ru и WebDAV не поддерживаются);
-- `.7z` и `.rar`: в рантайме PortMaster нет py7zr/rarfile, поэтому они работают только если на консоли есть
-  `7z` / `unrar` / `bsdtar`; `.zip` работает всегда;
+- `.7z`: встроенный распаковщик на стандартном `lzma` (LZMA/LZMA2, BCJ x86/ARM/ARM64/…, Deflate, BZip2, Copy,
+  проверка CRC) проверен на архивах, собранных по спецификации формата, и сверен с эталонным liblzma для ARM64;
+  на архивах, созданных настоящим 7-Zip, и на самой консоли — не проверен (нужен модуль `lzma` в рантайме Python;
+  не поддерживаются PPMd, BCJ2, шифрование — для них пробуются py7zr и утилиты 7z/bsdtar, если они есть);
+  `.rar` работает только если на консоли есть `unrar` / `bsdtar` / `7z`; `.zip` работает всегда;
 - какая кнопка у вас «A» — для этого есть переключатель «Кнопки A/B» в настройках;
 - автоопределение прошивки по `/etc/os-release` — эвристика; при запуске из PortMaster основным сигналом служит
   `CFW_NAME`, а если не сработало — выберите прошивку вручную.

@@ -451,6 +451,34 @@ if __name__ == "__main__":
     unittest.main()
 
 
+class ProgressMessages(unittest.TestCase):
+    def test_extract_and_install_details(self):
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, True)
+        arc = tmp / "Game.zip"
+        with zipfile.ZipFile(arc, "w") as z:
+            z.writestr("Game.sh", "x")
+            z.writestr("game/data.bin", b"0" * 3000)
+        msgs = []
+        st = Settings(firmware="rocknix", temp_dir=str(tmp / "t"))
+        inst = PortInstaller(st, load_profiles(BASE / "config" / "paths.json"), root=str(tmp / "root"),
+                             progress=lambda stage, frac, msg: msgs.append((stage, frac, msg)))
+        inst.install_archive(arc)
+        ext = [m for st_, f, m in msgs if st_ == "extract" and "Файлов: 2 из 2" in m]
+        self.assertTrue(ext, msgs)
+        self.assertIn("Распаковка Game.zip", ext[-1])
+        self.assertIn("2.9 КБ из 2.9 КБ", ext[-1])          # 3001 байт
+        self.assertTrue(any("Копирование" in m and "из 2" in m for st_, f, m in msgs if st_ == "install"))
+
+    def test_batch_prefix_and_download_speed(self):
+        inst = PortInstaller(Settings(), {}, root="")
+        inst._batch = (2, 3)
+        self.assertEqual(inst._title("Загрузка X"), "[2 из 3] Загрузка X")
+        inst._batch = (1, 1)
+        self.assertEqual(inst._title("Загрузка X"), "Загрузка X")
+        self.assertEqual(inst._clock(125), "2:05")
+
+
 class NormalizeUrl(unittest.TestCase):
     def test_adds_scheme(self):
         from pm_installer.clouds import normalize_url, get_provider

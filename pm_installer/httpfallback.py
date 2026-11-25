@@ -137,6 +137,20 @@ class CurlResponse:
             self._tmp = None
 
 
+def _reap(proc) -> str:
+    """Дочитывает stderr и закрывает каналы завершившегося curl."""
+    try:
+        err = proc.stderr.read().decode("utf-8", "replace")
+    except Exception:  # noqa: BLE001
+        err = ""
+    for f in (proc.stdout, proc.stderr):
+        try:
+            f.close()
+        except Exception:  # noqa: BLE001
+            pass
+    return err
+
+
 class CurlSession:
     """Минимальный аналог requests.Session поверх curl."""
 
@@ -188,18 +202,20 @@ class CurlSession:
                 if not (300 <= st < 400):
                     break
             if proc.poll() is not None and not raw:
-                err = proc.stderr.read().decode("utf-8", "replace")
+                err = _reap(proc)
                 shutil.rmtree(tmp, ignore_errors=True)
                 _raise_for_curl(proc.returncode or 1, err)
             if proc.poll() is not None:     # curl завершился: заголовки полны либо ошибка
                 if proc.returncode not in (0, None) and not raw.endswith((b"\r\n\r\n", b"\n\n")):
-                    err = proc.stderr.read().decode("utf-8", "replace")
+                    err = _reap(proc)
                     shutil.rmtree(tmp, ignore_errors=True)
                     _raise_for_curl(proc.returncode, err)
                 st, headers, loc = _parse_headers(raw)
                 break
             if time.time() > deadline:
                 proc.kill()
+                proc.wait()
+                _reap(proc)
                 shutil.rmtree(tmp, ignore_errors=True)
                 raise requests.ConnectTimeout("Connection timed out (нет ответа)")
             time.sleep(0.02)

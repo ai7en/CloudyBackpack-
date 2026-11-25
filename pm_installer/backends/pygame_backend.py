@@ -7,6 +7,7 @@ import pygame
 
 from ..constants import SCREEN_H, SCREEN_W
 from ..errors import BackendUnavailable
+from .combo import ExitCombo
 
 KEY_MAP = {pygame.K_UP: "up", pygame.K_DOWN: "down", pygame.K_LEFT: "left", pygame.K_RIGHT: "right",
            pygame.K_RETURN: "ok", pygame.K_KP_ENTER: "ok", pygame.K_ESCAPE: "back",
@@ -20,6 +21,7 @@ class PygameBackend:
 
     def __init__(self, title: str, fullscreen: bool, joy_map_path: Optional[Path] = None):
         self.swap_ab = False
+        self._combo = ExitCombo()
         try:
             pygame.init()
             flags = pygame.SCALED | (pygame.FULLSCREEN if fullscreen else 0)
@@ -102,7 +104,10 @@ class PygameBackend:
             elif ev.type == pygame.TEXTINPUT and ev.text.isprintable() and ev.text.strip():
                 out.append("text:" + ev.text)
             elif ev.type == pygame.JOYBUTTONDOWN and ev.button in self.joy_map:
-                out.append(self._pad(self.joy_map[ev.button]))
+                act = self.joy_map[ev.button]
+                out += self._combo.press(act, self._pad(act))
+            elif ev.type == pygame.JOYBUTTONUP and ev.button in self.joy_map:
+                self._combo.release(self.joy_map[ev.button])
             elif ev.type == pygame.JOYHATMOTION:
                 x, y = ev.value
                 out += [a for a, on in (("left", x < 0), ("right", x > 0), ("up", y > 0), ("down", y < 0)) if on]

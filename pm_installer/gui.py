@@ -7,6 +7,7 @@ import dataclasses
 import logging
 import os
 import threading
+import time
 from pathlib import Path
 from typing import Callable, List, Optional
 
@@ -114,7 +115,7 @@ class MainMenu(Screen):
         gui.header(APP_NAME)
         gui.text(self.info, 20, 62, gui.f_s, DIM)
         gui.rows([(t, "") for t in self.ITEMS], self.sel, y0=95)
-        gui.footer("↑↓ выбор   A — открыть   B — выход")
+        gui.footer("↑↓ выбор   A — открыть   B / Select+Start — выход")
 
 
 class SettingsScreen(Screen):
@@ -329,6 +330,7 @@ class InstallScreen(Screen):
         self.provider, self.files = provider, files
         self.state = "running"
         self.stage, self.frac, self.msg = "", -1.0, "Запуск…"
+        self.started = time.monotonic()
         self.lines: List[str] = []
         self.error = ""
         self.dialog: Optional[dict] = None
@@ -336,7 +338,8 @@ class InstallScreen(Screen):
         self.installer = PortInstaller(
             gui.settings, gui.profiles, root=gui.root, resolver=self._resolve,
             progress=self._progress, cancel=self.cancel, temp_default=gui.store.default_temp)
-        threading.Thread(target=self._work, daemon=True).start()
+        self.thread = threading.Thread(target=self._work, daemon=True)
+        self.thread.start()
 
     # ---- поток установки
     def _progress(self, stage, frac, msg):
@@ -407,9 +410,8 @@ class InstallScreen(Screen):
         titles = {"running": "Установка", "done": "Готово", "error": "Ошибка", "cancelled": "Отменено"}
         gui.header(titles[self.state])
         if self.state == "running":
-            gui.text(self.msg, 20, 80, maxw=W - 40)
-            gui.bar(20, 120, W - 40, 22, self.frac)
-            gui.footer("B — отмена")
+            self._draw_running(gui)
+            gui.footer("B — отмена   Select+Start — выход")
         elif self.state == "done":
             y = 70
             for ln in self.lines[:14]:
@@ -427,6 +429,33 @@ class InstallScreen(Screen):
             gui.footer("A/B — назад")
         if self.dialog:
             self._draw_dialog(gui, self.dialog)
+
+    STEPS = (("download", "Загрузка"), ("extract", "Распаковка"), ("install", "Копирование"))
+
+    def _draw_running(self, gui):
+        order = [k for k, _ in self.STEPS]
+        cur = order.index(self.stage) if self.stage in order else -1
+        x = 20
+        for i, (_, label) in enumerate(self.STEPS):
+            col = OKC if i < cur else FG if i == cur else DIM
+            t = f"{i + 1} {label}"
+            gui.text(t, x, 62, gui.f_s, col)
+            x += gui.be.text_size(gui.f_s, t)[0] + 14
+            if i < len(self.STEPS) - 1:
+                gui.text("›", x - 8, 62, gui.f_s, DIM)
+                x += 10
+        lines = self.msg.split("\n")
+        gui.text(lines[0], 20, 92, maxw=W - 110)
+        if self.frac >= 0:
+            pct = f"{int(self.frac * 100)}%"
+            gui.text(pct, W - 20 - gui.be.text_size(gui.f_m, pct)[0], 92)
+        gui.bar(20, 128, W - 40, 22, self.frac)
+        y = 168
+        for ln in lines[1:5]:
+            gui.text(ln, 20, y, gui.f_s, FG if y == 168 else DIM, maxw=W - 40)
+            y += 26
+        el = int(time.monotonic() - self.started)
+        gui.text(f"Прошло {el // 60}:{el % 60:02d}", 20, H - 68, gui.f_s, DIM)
 
     def _draw_dialog(self, gui, d):
         gui.rect(PANEL, 30, 90, W - 60, 300)
@@ -826,7 +855,7 @@ class Gui:
         self.be.swap_ab = bool(self.settings.swap_ab)
         for act in self.be.poll():
             if act == "quit":
-                self.running = False
+                self.quit()
             else:
                 self.top.handle(act, self)
         self.top.tick(self)
@@ -834,12 +863,24 @@ class Gui:
         self.top.draw(self)
         self.be.present()
 
+    def quit(self):
+        """Выход из любого места (Select+Start, закрытие окна): отменяет идущую установку."""
+        self.running = False
+        for scr in self.stack:
+            ev = getattr(scr, "cancel", None)
+            if isinstance(ev, threading.Event):
+                ev.set()
+
     def run(self):
         try:
             while self.running:
                 self.step()
                 self.be.delay(33)
         finally:
+            for scr in self.stack:             # даём рабочему потоку убрать временные файлы
+                t = getattr(scr, "thread", None)
+                if t is not None and t.is_alive():
+                    t.join(3)
             self.be.close()
 
     # ---- рисование

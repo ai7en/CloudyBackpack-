@@ -12,6 +12,7 @@ import sdl2.sdlttf as ttf
 
 from ..constants import SCREEN_H, SCREEN_W
 from ..errors import BackendUnavailable
+from .combo import ExitCombo
 
 _KEYS = {sdl2.SDLK_UP: "up", sdl2.SDLK_DOWN: "down", sdl2.SDLK_LEFT: "left", sdl2.SDLK_RIGHT: "right",
          sdl2.SDLK_RETURN: "ok", sdl2.SDLK_KP_ENTER: "ok", sdl2.SDLK_ESCAPE: "back",
@@ -36,6 +37,7 @@ class SDL2Backend:
 
     def __init__(self, title: str, fullscreen: bool):
         self.swap_ab = False
+        self._combo = ExitCombo()
         if sdl2.SDL_Init(sdl2.SDL_INIT_VIDEO | sdl2.SDL_INIT_GAMECONTROLLER | sdl2.SDL_INIT_JOYSTICK) != 0:
             raise BackendUnavailable("SDL_Init: " + _err())
         if ttf.TTF_Init() != 0:
@@ -177,7 +179,11 @@ class SDL2Backend:
             elif t == sdl2.SDL_CONTROLLERBUTTONDOWN:
                 act = _BUTTONS.get(ev.cbutton.button)
                 if act:
-                    out.append(self._pad(act))
+                    out += self._combo.press(act, self._pad(act))
+            elif t == sdl2.SDL_CONTROLLERBUTTONUP:
+                act = _BUTTONS.get(ev.cbutton.button)
+                if act:
+                    self._combo.release(act)
             elif t == sdl2.SDL_CONTROLLERAXISMOTION:
                 out += self._stick(ev.caxis.axis == sdl2.SDL_CONTROLLER_AXIS_LEFTX,
                                    ev.caxis.axis in (sdl2.SDL_CONTROLLER_AXIS_LEFTX, sdl2.SDL_CONTROLLER_AXIS_LEFTY),
@@ -185,7 +191,11 @@ class SDL2Backend:
             elif t == sdl2.SDL_JOYBUTTONDOWN and ev.jbutton.which in self._raw:
                 act = _RAW_BUTTONS.get(ev.jbutton.button)
                 if act:
-                    out.append(self._pad(act))
+                    out += self._combo.press(act, self._pad(act))
+            elif t == sdl2.SDL_JOYBUTTONUP and ev.jbutton.which in self._raw:
+                act = _RAW_BUTTONS.get(ev.jbutton.button)
+                if act:
+                    self._combo.release(act)
             elif t == sdl2.SDL_JOYHATMOTION and ev.jhat.which in self._raw:
                 v = ev.jhat.value
                 out += [a for a, bit in (("up", sdl2.SDL_HAT_UP), ("right", sdl2.SDL_HAT_RIGHT),

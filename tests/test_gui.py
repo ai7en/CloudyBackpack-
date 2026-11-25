@@ -231,6 +231,43 @@ class TestGui(unittest.TestCase):
         chosen = inst_cls.call_args[0][2]
         self.assertEqual([f.name for f in chosen], ["p1.zip", "p2.zip"])
 
+    def test_quit_cancels_running_install_and_waits_for_cleanup(self):
+        gate = threading.Event()
+        seen = {}
+
+        class SlowInstaller:
+            def __init__(self, *a, **kw):
+                seen["cancel"] = kw["cancel"]
+
+            def install_remote(self, provider, files):
+                gate.wait(5)
+                seen["cancelled"] = seen["cancel"].is_set()
+                raise G.CancelledError("Установка отменена.")
+        with mock.patch.object(G, "PortInstaller", SlowInstaller):
+            self.g.push(G.InstallScreen(self.g, object(), []))
+            scr = self.g.top
+            self.be.queue = ["quit"]
+            threading.Timer(0.2, gate.set).start()
+            self.g.run()
+        self.assertFalse(self.g.running)
+        self.assertTrue(seen["cancelled"], "выход отправляет отмену в поток установки")
+        self.assertFalse(scr.thread.is_alive(), "поток успел завершиться до закрытия окна")
+        self.assertTrue(self.be.closed)
+
+    def test_install_screen_shows_stage_details(self):
+        with mock.patch.object(G, "PortInstaller") as inst_cls:
+            inst_cls.return_value.install_remote.side_effect = lambda *a: (time.sleep(0.5), [])[1]
+            self.g.push(G.InstallScreen(self.g, object(), []))
+            scr = self.g.top
+            scr._progress("extract", 0.42, "Распаковка A.7z\nФайлов: 3 из 10\ngame/bin\n12 МБ из 30 МБ")
+            texts = []
+            self.be.draw_text = lambda f, s, *a: texts.append(s)
+            self.g.step()
+            scr.cancel.set()
+        joined = "\n".join(texts)
+        for part in ("2 Распаковка", "Распаковка A.7z", "42%", "Файлов: 3 из 10", "game/bin", "12 МБ из 30 МБ", "Прошло 0:0"):
+            self.assertIn(part, joined)
+
     def test_netcheck_screen(self):
         from pm_installer.diagnostics import Check
         fake = lambda targets, on_progress=None: [on_progress([Check("Дата и время", "ok", "x"),
@@ -355,6 +392,33 @@ class TestSdl2Backend(unittest.TestCase):
         self.ev(type=s.SDL_CONTROLLERBUTTONDOWN, cbutton=NS(button=s.SDL_CONTROLLER_BUTTON_B))
         self.ev(type=s.SDL_KEYDOWN, key=NS(keysym=NS(sym=s.SDLK_RETURN)))
         self.assertEqual(self.be.poll(), ["back", "ok", "ok"])
+
+    def test_select_start_combo_quits(self):
+        s = self.sdl2
+        B = s.SDL_CONTROLLER_BUTTON_BACK
+        S = s.SDL_CONTROLLER_BUTTON_START
+        self.ev(type=s.SDL_CONTROLLERBUTTONDOWN, cbutton=NS(button=B))
+        self.ev(type=s.SDL_CONTROLLERBUTTONDOWN, cbutton=NS(button=S))
+        self.assertEqual(self.be.poll(), ["select", "quit"], "Start при удержании Select не даёт действия «start»")
+        # отпустили обе — снова обычные кнопки
+        self.ev(type=s.SDL_CONTROLLERBUTTONUP, cbutton=NS(button=B))
+        self.ev(type=s.SDL_CONTROLLERBUTTONUP, cbutton=NS(button=S))
+        self.ev(type=s.SDL_CONTROLLERBUTTONDOWN, cbutton=NS(button=S))
+        self.assertEqual(self.be.poll(), ["start"])
+        # Start уже удерживается, затем Select — тоже выход; одиночное нажатие после отпускания не выходит
+        self.ev(type=s.SDL_CONTROLLERBUTTONDOWN, cbutton=NS(button=B))
+        self.assertEqual(self.be.poll(), ["quit"])
+        self.ev(type=s.SDL_CONTROLLERBUTTONUP, cbutton=NS(button=B))
+        self.ev(type=s.SDL_CONTROLLERBUTTONUP, cbutton=NS(button=S))
+        self.ev(type=s.SDL_CONTROLLERBUTTONDOWN, cbutton=NS(button=B))
+        self.assertEqual(self.be.poll(), ["select"])
+
+    def test_select_start_combo_raw_joystick(self):
+        s = self.sdl2
+        self.be._raw[5] = object()
+        self.ev(type=s.SDL_JOYBUTTONDOWN, jbutton=NS(which=5, button=6))      # select
+        self.ev(type=s.SDL_JOYBUTTONDOWN, jbutton=NS(which=5, button=7))      # start
+        self.assertEqual(self.be.poll(), ["select", "quit"])
 
     def test_raw_joystick_fallback_ignores_foreign_ids(self):
         s = self.sdl2
