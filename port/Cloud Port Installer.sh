@@ -88,6 +88,7 @@ if ! mount_python; then
 fi
 export PATH="${PYTHONHOME}/bin:$PATH"
 PYTHON_CMD="${PYTHONHOME}/bin/python3"
+export LD_LIBRARY_PATH="${PYTHONHOME}/lib:${LD_LIBRARY_PATH}"
 
 # ---- Окружение: PySDL2 и requests лежат в pylibs самого PortMaster
 export PYTHONPATH="$GAMEDIR:$controlfolder/pylibs:$controlfolder/exlibs${PYTHONPATH:+:$PYTHONPATH}"
@@ -96,6 +97,7 @@ export SDL_GAMECONTROLLERCONFIG="$sdl_controllerconfig"
 export PM_INSTALLER_HOME="$GAMEDIR/data"
 export CFW_NAME
 
+echo "ssl: $($PYTHON_CMD -c 'import ssl;print(ssl.OPENSSL_VERSION)' 2>&1 | tail -1) curl: $(command -v curl || echo нет)"
 echo "controlfolder=$controlfolder GAMEDIR=$GAMEDIR CFW_NAME=$CFW_NAME python=$($PYTHON_CMD --version 2>&1)"
 
 $PYTHON_CMD main.py "$@"

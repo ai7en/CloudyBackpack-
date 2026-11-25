@@ -12,6 +12,7 @@ from typing import Callable, ClassVar, List, Optional, Tuple
 import requests
 
 from ..diagnostics import describe_network_error
+from ..httpfallback import default_session
 from ..errors import (CancelledError, InvalidLinkError, NetworkError, wrap_oserror)
 
 log = logging.getLogger("pm_installer.net")
@@ -57,7 +58,7 @@ class CloudProvider(ABC):
     timeout = (10, 60)   # (соединение, чтение), сек
 
     def __init__(self, session: Optional[requests.Session] = None):
-        self.session = session or requests.Session()
+        self.session = session or default_session()
         self.session.headers.setdefault("User-Agent", UA)
 
     @classmethod

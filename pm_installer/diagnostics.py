@@ -28,7 +28,10 @@ def describe_network_error(e: BaseException, url: str = "") -> str:
     """Человеческое объяснение сетевой ошибки + техническая причина в скобках."""
     host = urlparse(url).hostname or "сервером"
     low = str(e).lower()
-    if isinstance(e, requests.exceptions.SSLError) or ("certificate" in low and "verify" in low):
+    if "ssl module is not available" in low:
+        base = ("В Python на консоли нет поддержки HTTPS (модуль ssl). Приложение пробует работать через curl; "
+                "если не получается — обновите PortMaster и его рантайм python.")
+    elif isinstance(e, requests.exceptions.SSLError) or ("certificate" in low and "verify" in low):
         base = (f"Ошибка защищённого соединения с {host}. Чаще всего на консоли неверные дата и время "
                 f"(сейчас {time.strftime('%Y-%m-%d %H:%M')}) — установите правильные.")
     elif any(m in low for m in _DNS):
@@ -71,6 +74,15 @@ def run_checks(targets: Sequence[str] = DEFAULT_TARGETS,
     add("Дата и время", "ok" if sane else "warn",
         time.strftime("%Y-%m-%d %H:%M", now) + ("" if sane else " — похоже на неверное, HTTPS может не работать"))
 
+    from .httpfallback import curl_path, default_session, ssl_available
+    if ssl_available():
+        add("Модуль SSL в Python", "ok", "есть")
+    elif curl_path():
+        add("Модуль SSL в Python", "warn", "нет — HTTPS идёт через curl")
+    else:
+        add("Модуль SSL в Python", "fail", "нет, и curl не найден — HTTPS работать не будет")
+    session = default_session()
+
     try:
         import certifi
         import os
@@ -95,7 +107,7 @@ def run_checks(targets: Sequence[str] = DEFAULT_TARGETS,
             add(f"Соединение {host}", "fail", str(e))
             continue
         try:
-            r = requests.get(url, timeout=(8, 10), stream=True)
+            r = session.request("GET", url, timeout=(8, 10), stream=True)
             code = r.status_code
             r.close()
             add(f"{'HTTPS' if p.scheme == 'https' else 'HTTP'} {host}", "ok", f"ответ HTTP {code}")
