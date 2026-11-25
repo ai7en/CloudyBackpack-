@@ -304,11 +304,53 @@ class TestProviders(unittest.TestCase):
         items = [{"type": "file", "name": "p1.7z", "path": "/p1.7z", "size": 1},
                  {"type": "file", "name": "notes.txt", "path": "/notes.txt"},
                  {"type": "dir", "name": "sub", "path": "/sub"}]
-        with mock.patch.object(type(prov), "_request",
-                               return_value=FakeResp(js={"type": "dir", "_embedded": {"items": items, "total": 3}})):
+        sub = [{"type": "file", "name": "deep.zip", "path": "/sub/deep.zip", "size": 2}]
+
+        def fake(self_, method, url, **kw):
+            if (kw.get("params") or {}).get("path") == "/sub":
+                return FakeResp(js={"type": "dir", "_embedded": {"items": sub, "total": 1}})
+            return FakeResp(js={"type": "dir", "_embedded": {"items": items, "total": 3}})
+        with mock.patch.object(type(prov), "_request", fake):
             f = prov.list_files("https://yadi.sk/d/abc")
-        self.assertEqual([x.name for x in f], ["p1.7z"])
+        self.assertEqual([x.name for x in f], ["p1.7z", "deep.zip"])      # подпапки обходятся
+        self.assertEqual([x.meta["display"] for x in f], ["p1.7z", "sub/deep.zip"])
         self.assertEqual(f[0].meta["path"], "/p1.7z")
+        self.assertTrue(all(x.meta["folder"] for x in f))
+
+    def test_folder_with_single_archive_still_shows_list(self):
+        from pm_installer.clouds import RemoteFile
+        inst = PortInstaller.__new__(PortInstaller)
+        inst.cancel = None
+        one = [RemoteFile("a.zip", 1, {"folder": True, "display": "x/a.zip"})]
+        asked = []
+        inst.list_remote = lambda url=None: (mock.Mock(download=mock.Mock(side_effect=RuntimeError("stop"))), one)
+        inst._check_cancel = lambda: None
+        inst.temp_root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, inst.temp_root, True)
+        with self.assertRaises(RuntimeError):
+            inst.install(choose=lambda files: asked.append(files) or files)
+        self.assertEqual(len(asked), 1)      # список показан, хотя архив один
+        asked.clear()
+        one[0].meta.pop("folder")            # одиночный файл по ссылке — без вопросов
+        with self.assertRaises(RuntimeError):
+            inst.install(choose=lambda files: asked.append(files) or files)
+        self.assertEqual(asked, [])
+
+    def test_direct_setting_still_uses_yandex_for_yandex_link(self):
+        self.assertEqual(get_provider("https://disk.yandex.ru/d/abc", "direct").key, "yandex")
+        self.assertEqual(get_provider("https://example.com/a.zip", "direct").key, "direct")
+
+    def test_direct_html_page_is_explained(self):
+        from pm_installer.clouds.direct import DirectLink
+        from pm_installer.clouds import RemoteFile
+        prov = DirectLink()
+        resp = FakeResp(js={})
+        resp.headers = {"Content-Type": "text/html; charset=utf-8"}
+        resp.close = lambda: None
+        with mock.patch.object(DirectLink, "_request", return_value=resp):
+            with self.assertRaises(InvalidLinkError) as cm:
+                prov.open_stream(RemoteFile("", None, {"url": "https://x/y"}))
+        self.assertIn("веб-страница", str(cm.exception))
 
     def test_yandex_download_calls_documented_endpoint(self):
         prov = get_provider("https://yadi.sk/d/abc")

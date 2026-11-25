@@ -112,7 +112,7 @@ class PortInstaller:
     def install(self, url: Optional[str] = None, choose: Optional[Chooser] = None) -> List[InstallReport]:
         """Полный цикл по ссылке. Для папки с несколькими архивами нужен choose()."""
         provider, files = self.list_remote(url)
-        if len(files) > 1:
+        if len(files) > 1 or (files and files[0].meta.get("folder") and choose is not None):
             if choose is None:
                 raise InvalidLinkError("В папке несколько архивов — выберите нужный.")
             files = choose(files)

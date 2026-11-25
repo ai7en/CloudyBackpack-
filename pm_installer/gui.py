@@ -357,7 +357,12 @@ class InstallScreen(Screen):
                          [n for n, _ in self.CONFLICT_OPTS])
 
     def _choose(self, files):
-        names = [f.name or "(без имени)" for f in files] + ["Установить все"]
+        def label(f):
+            size = f" ({f.size / 1048576:.0f} МБ)" if f.size else ""
+            return (f.meta.get("display") or f.name or "(без имени)") + size
+        names = [label(f) for f in files]
+        if len(files) > 1:
+            names.append("Установить все")
         idx = self._ask("choice", "Выберите архив", names)
         return files if idx == len(files) else [files[idx]]
 

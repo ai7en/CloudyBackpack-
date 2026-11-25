@@ -15,24 +15,37 @@ class YandexDisk(CloudProvider):
              "disk.yandex.kz", "disk.yandex.uz", "disk.360.yandex.ru")
     API = "https://cloud-api.yandex.net/v1/disk/public/resources"
 
+    MAX_DEPTH = 3
+    MAX_ITEMS = 300
+
     def list_files(self, url: str) -> List[RemoteFile]:
         out: List[RemoteFile] = []
+        self._walk(url, None, "", 0, out)
+        return out
+
+    def _walk(self, url: str, path, prefix: str, depth: int, out: List[RemoteFile]) -> None:
         offset = 0
-        while True:
-            j = self._request("GET", self.API,
-                              params={"public_key": url, "limit": 100, "offset": offset}).json()
-            if j.get("type") == "file":
-                return [RemoteFile(j.get("name", ""), j.get("size"), {"public_key": url})]
+        while len(out) < self.MAX_ITEMS:
+            params = {"public_key": url, "limit": 100, "offset": offset}
+            if path:
+                params["path"] = path
+            j = self._request("GET", self.API, params=params).json()
+            if j.get("type") == "file":      # ссылка на один файл
+                out.append(RemoteFile(j.get("name", ""), j.get("size"), {"public_key": url}))
+                return
             emb = j.get("_embedded") or {}
             items = emb.get("items", [])
             for it in items:
-                if it.get("type") == "file" and is_archive_name(it.get("name", "")):
-                    out.append(RemoteFile(it["name"], it.get("size"),
-                                          {"public_key": url, "path": it.get("path")}))
+                name = it.get("name", "")
+                if it.get("type") == "file" and is_archive_name(name):
+                    out.append(RemoteFile(name, it.get("size"), {
+                        "public_key": url, "path": it.get("path"), "folder": True,
+                        "display": prefix + name}))
+                elif it.get("type") == "dir" and depth < self.MAX_DEPTH:
+                    self._walk(url, it.get("path"), f"{prefix}{name}/", depth + 1, out)
             offset += len(items)
             if not items or offset >= emb.get("total", 0):
                 break
-        return out
 
     def open_stream(self, remote: RemoteFile):
         params = {"public_key": remote.meta["public_key"]}

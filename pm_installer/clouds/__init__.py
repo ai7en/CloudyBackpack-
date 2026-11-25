@@ -29,6 +29,10 @@ def get_provider(url: str, kind: str = "auto", session=None) -> CloudProvider:
     url = normalize_url(url)
     if not url:
         raise InvalidLinkError("Ссылка не задана. Укажите её в настройках.")
+    if kind == "direct":   # «прямая ссылка» для страницы известного облака бесполезна — берём нужный провайдер
+        for c in _REGISTRY.values():
+            if c.key != "direct" and c.matches(url):
+                return c(session)
     if kind != "auto":
         cls: Optional[Type[CloudProvider]] = _REGISTRY.get(kind)
         if cls is None:

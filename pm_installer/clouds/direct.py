@@ -2,6 +2,7 @@
 import urllib.parse
 from typing import List
 
+from ..errors import InvalidLinkError
 from . import register
 from .base import CloudProvider, RemoteFile, safe_filename
 
@@ -21,4 +22,9 @@ class DirectLink(CloudProvider):
         return [RemoteFile(name, None, {"url": url})]
 
     def open_stream(self, remote: RemoteFile):
-        return self._request("GET", remote.meta["url"], stream=True)
+        r = self._request("GET", remote.meta["url"], stream=True)
+        if r.headers.get("Content-Type", "").lower().startswith("text/html"):
+            r.close()
+            raise InvalidLinkError("По ссылке открывается веб-страница, а не файл. Если это ссылка на облако "
+                                   "(Яндекс.Диск, Google Drive, Mail.ru) — выберите тип облака «auto».")
+        return r
