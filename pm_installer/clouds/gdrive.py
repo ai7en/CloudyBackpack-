@@ -7,7 +7,7 @@ from typing import Dict, List, Optional, Tuple
 from ..constants import is_archive_name
 from ..errors import InvalidLinkError, MissingDependencyError
 from . import register
-from .base import CloudProvider, RemoteFile
+from .base import CloudProvider, RemoteDir, RemoteFile
 
 
 @register
@@ -27,6 +27,36 @@ class GoogleDrive(CloudProvider):
         if m:
             return "file", m.group(1)
         raise InvalidLinkError("В ссылке Google Drive не найден идентификатор файла (ожидается …/file/d/<ID>/…).")
+
+    EMBED = "https://drive.google.com/embeddedfolderview"
+    _ENTRY = re.compile(r'<a href="https://drive\.google\.com/(file/d|drive/folders)/([\w-]+)[^"]*"[^>]*>'
+                        r'.*?class="flip-entry-title">(.*?)</div>', re.S)
+
+    @classmethod
+    def parse_embedded(cls, page: str) -> Tuple[List[Tuple[str, str, str]], int]:
+        """→ ([(file|folder, id, имя)], число найденных записей). Разбор страницы embeddedfolderview."""
+        out = []
+        for kind, id_, title in cls._ENTRY.findall(page):
+            out.append(("folder" if kind != "file/d" else "file", id_, html.unescape(re.sub(r"<[^>]+>", "", title)).strip()))
+        return out, len(out)
+
+    def list_dir(self, url: str, path: Optional[str] = None,
+                 prefix: str = "") -> Tuple[List[RemoteDir], List[RemoteFile]]:
+        kind, id_ = self.parse(url)
+        if kind == "file":
+            return [], [RemoteFile("", None, {"id": id_})]
+        folder = path or id_
+        r = self._request("GET", self.EMBED, params={"id": folder})
+        entries, _ = self.parse_embedded(r.text)
+        r.close()
+        if not entries:
+            if path is None:                      # корень: пробуем gdown, если он есть
+                return [], self.list_files(url)
+            return [], []
+        dirs = [RemoteDir(n, i, {"prefix": f"{prefix}{n}/"}) for k, i, n in entries if k == "folder"]
+        files = [RemoteFile(n, None, {"id": i, "display": prefix + n})
+                 for k, i, n in entries if k == "file" and is_archive_name(n)]
+        return dirs, files
 
     def list_files(self, url: str) -> List[RemoteFile]:
         kind, id_ = self.parse(url)
@@ -50,9 +80,10 @@ class GoogleDrive(CloudProvider):
                 out.append(RemoteFile(name, None, {"id": it.id}))
         return out
 
-    def open_stream(self, remote: RemoteFile):
+    def open_stream(self, remote: RemoteFile, start: int = 0):
         params = {"id": remote.meta["id"], "export": "download", "confirm": "t"}
-        r = self._request("GET", self.DOWNLOAD, params=params, stream=True)
+        hdr = self.range_headers(start)
+        r = self._request("GET", self.DOWNLOAD, params=params, stream=True, headers=hdr)
         if not self._is_html(r):
             return r
         # Большие файлы: страница «проверка на вирусы» с формой подтверждения
@@ -62,7 +93,7 @@ class GoogleDrive(CloudProvider):
         if form is None:
             raise InvalidLinkError("Google Drive не отдаёт файл: он не публичный или исчерпан лимит скачиваний.")
         action, fields = form
-        r = self._request("GET", action, params=fields, stream=True)
+        r = self._request("GET", action, params=fields, stream=True, headers=hdr)
         if self._is_html(r):
             r.close()
             raise InvalidLinkError("Google Drive не отдаёт файл: он не публичный или исчерпан лимит скачиваний.")

@@ -11,9 +11,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
-from .archives import extract
+from . import cache, portinfo, space
+from .archives import extract, uncompressed_size
 from .manager import format_size
-from .clouds import CloudProvider, RemoteFile, get_provider, normalize_url
+from .clouds import CloudProvider, RemoteDir, RemoteFile, get_provider, normalize_url
 from .constants import is_archive_name
 from .errors import (CancelledError, ConflictAbort, InstallerError, InvalidLinkError,
                      wrap_oserror)
@@ -47,6 +48,8 @@ class InstallReport:
     backups: List[str] = field(default_factory=list)
     ignored: List[str] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
+    info: Optional[object] = None                      # PortInfo из port.json
+    names: List[str] = field(default_factory=list)     # имена установленных скриптов и папок (для истории)
 
     def summary(self) -> List[str]:
         lines = [f"Архив: {self.archive}", f"Прошивка: {self.firmware}"]
@@ -55,6 +58,8 @@ class InstallReport:
         lines += [f"Резервная копия: {x}" for x in self.backups]
         lines += [f"Не установлено (не часть порта): {x}" for x in self.ignored]
         lines += [f"Внимание: {x}" for x in self.warnings]
+        if self.info:
+            lines += self.info.lines()
         return lines
 
 
@@ -73,6 +78,7 @@ class PortInstaller:
         self.cancel = cancel or threading.Event()
         self.allow_sudo = allow_sudo
         self.session = session
+        self.history = None            # History: куда записывать установленное
         self.temp_root = Path(settings.temp_dir) if settings.temp_dir else Path(
             temp_default or Path(tempfile.gettempdir()) / "pm_installer")
 
@@ -120,6 +126,17 @@ class PortInstaller:
             raise InvalidLinkError("По ссылке не найдено архивов .zip / .7z / .rar.")
         return provider, files
 
+    def open_dir(self, path: Optional[str] = None, prefix: str = "", url: Optional[str] = None):
+        """Одна папка облака: (провайдер, подпапки, архивы). Для корня без содержимого — ошибка."""
+        url = normalize_url(self.settings.url if url is None else url)
+        provider = get_provider(url, self.settings.cloud, self.session)
+        log.info("Облако: %s, ссылка: %s, папка: %s", provider.key, url, path or "/")
+        dirs, files = provider.list_dir(url, path, prefix)
+        files = [f for f in files if not f.name or is_archive_name(f.name)]
+        if path is None and not files and not dirs:
+            raise InvalidLinkError("По ссылке не найдено архивов .zip / .7z / .rar.")
+        return provider, dirs, files
+
     def install(self, url: Optional[str] = None, choose: Optional[Chooser] = None) -> List[InstallReport]:
         """Полный цикл по ссылке. Для папки с несколькими архивами нужен choose()."""
         provider, files = self.list_remote(url)
@@ -129,7 +146,8 @@ class PortInstaller:
             files = choose(files)
         return self.install_remote(provider, files)
 
-    def install_remote(self, provider: CloudProvider, files: List[RemoteFile]) -> List[InstallReport]:
+    def install_remote(self, provider: CloudProvider, files: List[RemoteFile],
+                       source: Optional[dict] = None) -> List[InstallReport]:
         """Скачивает и устанавливает выбранные файлы (список уже показан пользователю)."""
         reports = []
         dl_dir = self.temp_root / "download"
@@ -151,14 +169,37 @@ class PortInstaller:
                     lines += [f"Скачано {format_size(done)}", f"{format_size(int(speed))}/с"]
                 self._progress("download", done / total if total else -1, "\n".join(lines))
 
-            path = provider.download(rf, dl_dir, on_dl, self.cancel)
+            keep = self.settings.keep_downloads
+            src_url = (source or {}).get("url") or self.settings.url
+            ident = provider._identity(rf)
+            cached = cache.lookup(self.temp_root, src_url, ident, rf.name, rf.size) if keep else None
+            if cached is not None:
+                self._progress("download", 1.0, f"{self._title('Архив уже скачан')}\n{label}\nберу из кэша")
+                path = cached
+            else:
+                if rf.size:    # место под скачанный архив; под распаковку проверим, когда узнаем его содержимое
+                    space.check(dl_dir, space.needed(rf.size), "для загрузки")
+
+                def on_retry(i, total_tries, err, _l=label):
+                    self._progress("download", -1, f"{self._title(f'Загрузка {_l}')}\n"
+                                   f"Связь оборвалась — повтор {i} из {total_tries}, докачиваю…")
+                path = provider.download(rf, dl_dir, on_dl, self.cancel, on_retry)
+                if keep:
+                    try:
+                        path = cache.store(self.temp_root, src_url, ident, rf.name, path)
+                    except OSError:
+                        log.exception("Не удалось сохранить архив в кэш")
             try:
-                reports.append(self.install_archive(path))
+                rep = self.install_archive(path)
+                reports.append(rep)
+                if self.history is not None and source:
+                    self.history.record(source, rf, rep.names)
             finally:
-                try:
-                    path.unlink()
-                except OSError:
-                    pass
+                if not keep:
+                    try:
+                        path.unlink()
+                    except OSError:
+                        pass
         self._batch = None
         return reports
 
@@ -176,6 +217,11 @@ class PortInstaller:
         except OSError as e:
             raise wrap_oserror(e, self.temp_root) from e
         try:
+            unpacked = uncompressed_size(archive)
+            if unpacked:
+                space.check(work, space.needed(unpacked), "для распаковки")
+                if not space.same_device(work, targets.port_dir):      # перенос копированием, а не переименованием
+                    space.check(targets.port_dir, space.needed(unpacked), "в папке портов")
             title = self._title(f"Распаковка {archive.name}")
             self._progress("extract", -1, title + "\nПодготовка…")
 
@@ -193,6 +239,10 @@ class PortInstaller:
             layout = analyze(work)
             report.warnings += layout.warnings
             report.ignored += [p.name for p in layout.ignored]
+            try:
+                report.info = portinfo.read(work)
+            except Exception:      # справочные данные не должны ломать установку
+                log.exception("port.json")
             log.info("Порт: sh=%s, папки=%s", [s.name for s in layout.scripts],
                      [d.name for d in layout.port_dirs])
 
@@ -256,6 +306,7 @@ class PortInstaller:
         except OSError as e:
             raise wrap_oserror(e, dst) from e
         report.installed.append(f"{dst.name} → {dst_dir}")
+        report.names.append(dst.name)
         if is_script:
             self._make_executable(dst, report)
 

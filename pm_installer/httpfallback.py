@@ -162,7 +162,7 @@ class CurlSession:
     def __del__(self):
         shutil.rmtree(getattr(self, "_dir", ""), ignore_errors=True)
 
-    def _cmd(self, url, hdr_file, timeout, extra):
+    def _cmd(self, url, hdr_file, timeout, extra, headers=None):
         exe = curl_path()
         if not exe:
             raise requests.ConnectionError("curl не найден")
@@ -170,11 +170,11 @@ class CurlSession:
         cmd = [exe, "-sS", "-L", "--max-redirs", "10", "--connect-timeout", str(int(ct)),
                "--speed-time", str(int(rt)), "--speed-limit", "1", "-b", self._jar, "-c", self._jar,
                "-D", hdr_file, "--compressed"]
-        for k, v in self.headers.items():
+        for k, v in {**self.headers, **(headers or {})}.items():
             cmd += ["-H", f"{k}: {v}"]
         return cmd + extra + [url]
 
-    def request(self, method, url, params=None, timeout=None, stream=False, **kw):
+    def request(self, method, url, params=None, timeout=None, stream=False, headers=None, **kw):
         if method.upper() != "GET":
             raise NotImplementedError("CurlSession поддерживает только GET")
         if params:
@@ -184,7 +184,7 @@ class CurlSession:
         if not stream:
             body = os.path.join(tmp, "b")
             try:
-                r = subprocess.run(self._cmd(url, hdr, timeout, ["-o", body]), capture_output=True)
+                r = subprocess.run(self._cmd(url, hdr, timeout, ["-o", body], headers), capture_output=True)
                 if r.returncode != 0:
                     _raise_for_curl(r.returncode, r.stderr.decode("utf-8", "replace"))
                 status, headers, loc = _parse_headers(_read(hdr))
@@ -192,7 +192,7 @@ class CurlSession:
             finally:
                 shutil.rmtree(tmp, ignore_errors=True)
             return CurlResponse(status, headers, urllib.parse.urljoin(url, loc) if loc else url, data)
-        proc = subprocess.Popen(self._cmd(url, hdr, timeout, ["-o", "-"]), stdout=subprocess.PIPE,
+        proc = subprocess.Popen(self._cmd(url, hdr, timeout, ["-o", "-"], headers), stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE)
         deadline = time.time() + (timeout[0] + timeout[1] if isinstance(timeout, tuple) else 60) + 5
         while True:   # ждём конец заголовков финального ответа

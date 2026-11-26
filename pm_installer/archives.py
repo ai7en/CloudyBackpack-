@@ -43,6 +43,21 @@ def detect_format(path: Path) -> str:
         "ошибки или файл повреждён).")
 
 
+def uncompressed_size(path: Path) -> Optional[int]:
+    """Размер содержимого архива после распаковки (по заголовкам) или None, если узнать нельзя (rar)."""
+    try:
+        fmt = detect_format(path)
+        if fmt == "zip":
+            with zipfile.ZipFile(path) as zf:
+                return sum(i.file_size for i in zf.infolist())
+        if fmt == "7z":
+            from .sevenzip import list_entries
+            return sum(e.size for e in list_entries(path))
+    except Exception as e:  # noqa: BLE001 — только оценка; настоящая ошибка будет при распаковке
+        log.info("Размер содержимого %s определить не удалось: %s", path, e)
+    return None
+
+
 def extract(path: Path, dest: Path, progress: Progress = None,
             cancel: Optional[threading.Event] = None) -> str:
     path, dest = Path(path), Path(dest)

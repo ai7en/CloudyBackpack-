@@ -16,7 +16,12 @@ from .constants import APP_NAME, SCREEN_H as H, SCREEN_W as W
 from .diagnostics import DEFAULT_TARGETS, Check, origin_of, run_checks
 from .errors import CancelledError, InstallerError
 from .firmware import describe_targets, detect, env_cfw_name
+from . import cache, updater
+from .httpfallback import default_session
+from . import __version__
 from . import manager as mgr
+from . import space
+from .history import History, display_name
 from .installer import ConflictAction, PortInstaller
 from .settings import CONFLICT_LABELS, CONFLICT_POLICIES, cloud_title
 
@@ -79,7 +84,7 @@ class MessageScreen(Screen):
 
 
 class MainMenu(Screen):
-    ITEMS = ["Облака", "Установленные порты", "Настройки", "Проверка сети", "Пути установки", "Выход"]
+    ITEMS = ["Облака", "Установленные порты", "Настройки", "Проверка сети", "Пути установки", "Обновление", "Выход"]
 
     def __init__(self):
         self.sel = 0
@@ -91,7 +96,7 @@ class MainMenu(Screen):
         if auto:
             key = detect(gui.profiles, gui.root, gui.cfw)
         label = gui.profiles[key].label if key in gui.profiles else "не определена"
-        self.info = f"Прошивка: {label}{' (авто)' if auto else ''}"
+        self.info = f"Прошивка: {label}{' (авто)' if auto else ''} · версия {__version__}"
 
     def handle(self, act, gui):
         self.sel = _move(self.sel, act, len(self.ITEMS))
@@ -108,6 +113,8 @@ class MainMenu(Screen):
                 gui.push(NetCheckScreen(gui))
             elif self.sel == 4:
                 gui.push(PathsScreen())
+            elif self.sel == 5:
+                gui.push(UpdateScreen(gui))
             else:
                 gui.running = False
 
@@ -120,7 +127,8 @@ class MainMenu(Screen):
 
 class SettingsScreen(Screen):
     ROWS = [("firmware", "Прошивка"), ("temp_dir", "Временная папка"),
-            ("conflict_policy", "При конфликте имён"), ("swap_ab", "Кнопки A/B")]
+            ("conflict_policy", "При конфликте имён"), ("swap_ab", "Кнопки A/B"),
+            ("keep_downloads", "Хранить скачанные архивы"), ("clear_cache", "Очистить кэш загрузок")]
     TEXT_ROWS = ("temp_dir",)
 
     def __init__(self):
@@ -131,12 +139,17 @@ class SettingsScreen(Screen):
             return ["auto"] + [k for k, _ in available_providers()]
         if key == "firmware":
             return ["auto"] + list(gui.profiles)
-        if key == "swap_ab":
+        if key in ("swap_ab", "keep_downloads"):
             return [False, True]
         return list(CONFLICT_POLICIES)
 
     def _pretty(self, key, gui):
+        if key == "clear_cache":
+            n, size = cache.usage(self._temp_root(gui))
+            return f"{n} файл(ов), {mgr.format_size(size)} — A: очистить" if n else "пусто"
         v = getattr(gui.settings, key)
+        if key == "keep_downloads":
+            return "Да — не качать повторно" if v else "Нет — удалять после установки"
         if key == "url":
             return v or "(не задана)"
         if key == "temp_dir":
@@ -151,6 +164,10 @@ class SettingsScreen(Screen):
             return gui.profiles[v].label if v in gui.profiles else v
         return CONFLICT_LABELS.get(v, v)
 
+    @staticmethod
+    def _temp_root(gui):
+        return Path(gui.settings.temp_dir or gui.store.default_temp)
+
     def _set(self, gui, key, value):
         setattr(gui.settings, key, value)
         try:
@@ -163,6 +180,10 @@ class SettingsScreen(Screen):
         key, title = self.ROWS[self.sel]
         if act == "back":
             gui.pop()
+        elif key == "clear_cache":
+            if act == "ok":
+                freed = cache.clear(self._temp_root(gui))
+                gui.push(MessageScreen("Кэш очищен", [f"Освобождено: {mgr.format_size(freed)}"], OKC))
         elif key in self.TEXT_ROWS and act == "ok":
             gui.push(TextInput(title, getattr(gui.settings, key),
                                lambda v, k=key: self._set(gui, k, v.strip())))
@@ -243,6 +264,84 @@ class TextInput(Screen):
             gui.key_cap(20 + c * (sw + 4), top + len(self.CHARS) * (ch + 4), sw, ch, name,
                         (self.r, self.c) == (len(self.CHARS), c))
         gui.footer("A ввод  X удалить  Y регистр  Start готово  B отмена")
+
+
+class UpdateScreen(Screen):
+    """Проверка и установка обновления приложения."""
+
+    def __init__(self, gui: "Gui"):
+        self.state = "checking"          # checking | ready | latest | applying | done | error
+        self.info = None
+        self.error = ""
+        self.msg = ""
+        self.done_bytes = 0
+        threading.Thread(target=self._check, args=(gui,), daemon=True).start()
+
+    def _check(self, gui):
+        try:
+            self.info = updater.check(default_session(), gui.settings.update_url)
+            self.state = "ready" if self.info.newer else "latest"
+        except InstallerError as e:
+            self.error, self.state = str(e), "error"
+        except Exception as e:  # noqa: BLE001
+            log.exception("Сбой проверки обновлений")
+            self.error, self.state = f"Непредвиденная ошибка: {e}", "error"
+
+    def _apply(self, gui):
+        root = Path(__file__).resolve().parent.parent
+        script = os.environ.get("PM_SCRIPT_PATH")
+        try:
+            files = updater.apply(default_session(), self.info, root, gui.store.home / "backup",
+                                  Path(script) if script else None,
+                                  lambda what, n: (setattr(self, "msg", what), setattr(self, "done_bytes", n)))
+            self.msg = f"Обновлено файлов: {len(files)}"
+            self.state = "done"
+        except InstallerError as e:
+            self.error, self.state = str(e), "error"
+        except Exception as e:  # noqa: BLE001
+            log.exception("Сбой обновления")
+            self.error, self.state = f"Непредвиденная ошибка: {e}", "error"
+
+    def handle(self, act, gui):
+        if self.state in ("checking", "applying"):
+            return
+        if self.state == "ready" and act == "ok":
+            self.state, self.msg = "applying", "Загрузка"
+            threading.Thread(target=self._apply, args=(gui,), daemon=True).start()
+        elif self.state == "done" and act == "ok":
+            gui.running = False
+        elif act in ("back", "ok"):
+            gui.pop()
+
+    def draw(self, gui):
+        gui.header("Обновление")
+        y = 70
+        gui.text(f"Установлена версия: {__version__}", 20, y)
+        if self.state == "checking":
+            gui.text("Проверяю наличие обновления…", 20, y + 40, color=DIM)
+            gui.footer("")
+        elif self.state == "latest":
+            gui.text(f"Последняя версия: {self.info.version}. Обновление не требуется.", 20, y + 40, color=OKC,
+                     maxw=W - 40)
+            gui.footer("A/B — назад")
+        elif self.state == "ready":
+            gui.text(f"Доступна версия: {self.info.version}", 20, y + 36, color=WARN)
+            for i, part in enumerate(gui.wrap(self.info.notes or "Описание не указано.", gui.f_s, W - 40)[:8]):
+                gui.text(part, 20, y + 76 + 22 * i, gui.f_s, DIM)
+            gui.footer("A — обновить   B — назад")
+        elif self.state == "applying":
+            gui.text(f"{self.msg}… {mgr.format_size(self.done_bytes)}", 20, y + 40)
+            gui.bar(20, y + 80, W - 40, 22, -1)
+            gui.footer("")
+        elif self.state == "done":
+            gui.text("Готово. Обновление установлено.", 20, y + 40, color=OKC)
+            gui.text(self.msg, 20, y + 70, gui.f_s, DIM)
+            gui.text("Нажмите A — приложение закроется; запустите его снова.", 20, y + 100, gui.f_s, maxw=W - 40)
+            gui.footer("A — закрыть приложение")
+        else:
+            for i, part in enumerate(gui.wrap(self.error, gui.f_m, W - 40)):
+                gui.text(part, 20, y + 40 + 26 * i, color=ERR)
+            gui.footer("A/B — назад")
 
 
 class NetCheckScreen(Screen):
@@ -326,8 +425,8 @@ class InstallScreen(Screen):
     CONFLICT_OPTS = [("Перезаписать", ConflictAction.OVERWRITE), ("Пропустить", ConflictAction.SKIP),
                      ("Резервная копия", ConflictAction.BACKUP), ("Прервать", ConflictAction.ABORT)]
 
-    def __init__(self, gui: "Gui", provider=None, files=None):
-        self.provider, self.files = provider, files
+    def __init__(self, gui: "Gui", provider=None, files=None, source=None):
+        self.provider, self.files, self.source = provider, files, source
         self.state = "running"
         self.stage, self.frac, self.msg = "", -1.0, "Запуск…"
         self.started = time.monotonic()
@@ -338,6 +437,7 @@ class InstallScreen(Screen):
         self.installer = PortInstaller(
             gui.settings, gui.profiles, root=gui.root, resolver=self._resolve,
             progress=self._progress, cancel=self.cancel, temp_default=gui.store.default_temp)
+        self.installer.history = gui.history
         self.thread = threading.Thread(target=self._work, daemon=True)
         self.thread.start()
 
@@ -372,7 +472,7 @@ class InstallScreen(Screen):
     def _work(self):
         try:
             if self.files is not None:     # список выбран на экране облака
-                reports = self.installer.install_remote(self.provider, self.files)
+                reports = self.installer.install_remote(self.provider, self.files, self.source)
             else:
                 reports = self.installer.install(choose=self._choose)
             for rep in reports:
@@ -599,32 +699,42 @@ class CloudEditScreen(Screen):
 
 
 class BrowseScreen(Screen):
-    """Содержимое облака на весь экран: отметить архивы и установить."""
+    """Облако как проводник: папки, поиск, отметки архивов (отметки сохраняются при переходах)."""
 
     def __init__(self, gui: "Gui", entry: dict):
         self.entry = dict(entry)
         self.state = "loading"
+        self.dirs: list = []
         self.files: list = []
-        self.marked: set = set()
+        self.stack: list = []            # [(path, prefix, name)] — путь от корня до текущей папки
+        self.marked: dict = {}           # ключ (имя с подпапкой) → RemoteFile
+        self.filter = ""
+        self.rows: list = []
         self.sel = 0
         self.error = ""
+        self.states: dict = {}           # ключ → new/same/changed
         self.provider = None
         self._token = 0
         self._load(gui)
 
+    # ---- загрузка текущей папки
     def _load(self, gui):
         self._token += 1
         token = self._token
         self.state, self.error = "loading", ""
+        path, prefix = (self.stack[-1][0], self.stack[-1][1]) if self.stack else (None, "")
         st = dataclasses.replace(gui.settings, url=self.entry["url"], cloud=self.entry.get("cloud") or "auto")
         inst = PortInstaller(st, gui.profiles, root=gui.root, temp_default=gui.store.default_temp)
 
         def work():
             try:
-                provider, files = inst.list_remote()
+                provider, dirs, files = inst.open_dir(path, prefix)
                 if token != self._token:
                     return
-                self.provider, self.files, self.marked, self.sel = provider, files, set(), 0
+                self.provider, self.dirs, self.files = provider, dirs, files
+                self.states = {key(f): gui.history.status(self.entry["url"], f) for f in files}
+                self.filter, self.sel = "", 0
+                self._rebuild()
                 self.state = "ready"
             except InstallerError as e:
                 log.error("Ошибка чтения облака: %s", e)
@@ -636,10 +746,35 @@ class BrowseScreen(Screen):
                     self.error, self.state = f"Непредвиденная ошибка: {e}", "error"
         threading.Thread(target=work, daemon=True).start()
 
+    def _rebuild(self):
+        q = self.filter.lower()
+        rows = [("up", None)] if self.stack else []
+        rows += [("dir", d) for d in self.dirs if q in d.name.lower()]
+        rows += [("file", f) for f in self.files if q in (display_name(f) or "").lower()]
+        self.rows = rows
+        self.sel = min(self.sel, max(0, len(rows) - 1))
+
+    def _files_in_view(self):
+        return [f for k, f in self.rows if k == "file"]
+
+    def _enter(self, gui, d):
+        self.stack.append((d.path, d.meta.get("prefix", ""), d.name))
+        self._load(gui)
+
+    def _up(self, gui):
+        self.stack.pop()
+        self._load(gui)
+
     def handle(self, act, gui):
         if act == "back":
-            self._token += 1
-            gui.pop()
+            if self.state == "ready" and self.filter:
+                self.filter = ""
+                self._rebuild()
+            elif self.stack:
+                self._up(gui)
+            else:
+                self._token += 1
+                gui.pop()
             return
         if self.state == "error":
             if act == "ok":
@@ -647,18 +782,40 @@ class BrowseScreen(Screen):
             return
         if self.state != "ready":
             return
-        n = len(self.files)
+        n = len(self.rows)
+        if act == "select":
+            def done(v):
+                self.filter, self.sel = v.strip(), 0
+                self._rebuild()
+            gui.push(TextInput("Поиск по названию", self.filter, done))
+            return
+        if not n:
+            return
         self.sel = _move(self.sel, act, n)
-        if act == "x":
-            self.marked ^= {self.sel}
+        kind, obj = self.rows[self.sel]
+        view = self._files_in_view()
+        if act == "x" and kind == "file":
+            self.marked.pop(key(obj), None) if key(obj) in self.marked else self.marked.__setitem__(key(obj), obj)
         elif act == "y":
-            self.marked = set() if len(self.marked) == n else set(range(n))
+            if view and all(key(f) in self.marked for f in view):
+                for f in view:
+                    self.marked.pop(key(f), None)
+            else:
+                self.marked.update({key(f): f for f in view})
+        elif act == "r":                              # отметить всё, что изменилось в облаке (в этой папке)
+            self.marked.update({key(f): f for f in view if self.states.get(key(f)) == "changed"})
+        elif act == "ok" and kind == "up":
+            self._up(gui)
+        elif act == "ok" and kind == "dir":
+            self._enter(gui, obj)
         elif act in ("ok", "start"):
-            chosen = [self.files[i] for i in sorted(self.marked)] or [self.files[self.sel]]
-            gui.push(InstallScreen(gui, self.provider, chosen))
+            chosen = sorted(self.marked.values(), key=key) or ([obj] if kind == "file" else [])
+            if chosen:
+                gui.push(InstallScreen(gui, self.provider, chosen, source=self.entry))
 
     def draw(self, gui):
-        gui.header(cloud_title(self.entry))
+        where = "/".join(n for _, _, n in self.stack)
+        gui.header(cloud_title(self.entry) + (f" / {where}" if where else ""))
         if self.state == "loading":
             gui.text("Читаю список файлов…", 20, 80)
             gui.bar(20, 120, W - 40, 22, -1)
@@ -670,22 +827,47 @@ class BrowseScreen(Screen):
                 y += 26
             gui.footer("A — повторить   B — назад")
         else:
-            n = len(self.files)
-            total = sum(f.size or 0 for f in self.files)
-            gui.text(f"Архивов: {n} · {mgr.format_size(total)} · отмечено: {len(self.marked)}",
-                     20, 58, gui.f_s, DIM, maxw=W - 40)
+            chosen = list(self.marked.values()) or [obj for k, obj in self.rows[self.sel:self.sel + 1] if k == "file"]
+            need = max([f.size or 0 for f in chosen] or [0])          # архивы ставятся по одному
+            free = space.free_bytes(gui.settings.temp_dir or gui.store.default_temp)
+            low = free is not None and need and free < space.needed(need)
+            upd = sum(1 for st in self.states.values() if st == "changed")
+            head = (f"Папок: {len(self.dirs)} · " if self.dirs else "") + f"архивов: {len(self.files)}"
+            if upd:
+                head += f" · обновлений: {upd}"
+            if self.filter:
+                head += f" · поиск: «{self.filter}»"
+            head += f" · отмечено: {len(self.marked)} · свободно: {mgr.format_size(free)}"
+            gui.text(head + (" — МАЛО МЕСТА" if low else ""), 20, 58, gui.f_s, ERR if low else DIM, maxw=W - 40)
 
             def item(i, x, y, w):
-                f = self.files[i]
-                mark = "[x]" if i in self.marked else "[ ]"
+                kind, obj = self.rows[i]
+                if kind == "up":
+                    gui.text("..  (назад)", x, y + 8, color=DIM, maxw=w)
+                    return
+                if kind == "dir":
+                    gui.text(f"> {obj.name}/", x, y + 8, color=ACC, maxw=w)
+                    return
+                f = obj
+                mark = "[x]" if key(f) in self.marked else "[ ]"
                 size = mgr.format_size(f.size) if f.size else ""
-                sw = gui.be.text_size(gui.f_s, size)[0] if size else 0
-                gui.text(f"{mark} {f.meta.get('display') or f.name or '(без имени)'}", x, y + 8,
-                         color=OKC if i in self.marked else FG, maxw=w - sw - 12)
-                if size:
-                    gui.text(size, x + w - sw, y + 11, gui.f_s, DIM)
-            gui.list_view(n, self.sel, 84, 40, item)
-            gui.footer("A установить   X отметить   Y все   B назад")
+                st = self.states.get(key(f), "new")
+                tag = {"same": "✓ установлен", "changed": "↑ обновить"}.get(st, "")
+                right = "  ".join(t for t in (tag, size) if t)
+                sw = gui.be.text_size(gui.f_s, right)[0] if right else 0
+                gui.text(f"{mark} {f.name or display_name(f) or '(без имени)'}", x, y + 8,
+                         color=OKC if key(f) in self.marked else FG, maxw=w - sw - 12)
+                if right:
+                    gui.text(right, x + w - sw, y + 11, gui.f_s, {"same": OKC, "changed": WARN}.get(st, DIM))
+            if self.rows:
+                gui.list_view(len(self.rows), self.sel, 84, 40, item)
+            else:
+                gui.text("Ничего не найдено." if self.filter else "Здесь нет архивов.", 20, 90, color=DIM)
+            gui.footer("A открыть/установить  X отметить  Y все  R обновления  SELECT поиск  B назад")
+
+
+def key(f) -> str:
+    return display_name(f) or f.name
 
 
 class ManagerScreen(Screen):
@@ -703,6 +885,8 @@ class ManagerScreen(Screen):
         self.profile = None
         self.fw_label = ""
         self.root = gui.root
+        self.history = gui.history
+        self.free: Optional[int] = None
         self.pending: Optional[tuple] = None     # (заголовок, строки, цвет) — показать из основного потока
         threading.Thread(target=self._scan, args=(gui,), daemon=True).start()
 
@@ -712,6 +896,10 @@ class ManagerScreen(Screen):
             self.profile = gui.profiles[key]
             self.fw_label = self.profile.label
             self.ports = mgr.scan(self.profile, gui.root)
+            for p in self.ports:
+                p.source = gui.history.source_of(p.names)
+            dirs = mgr.existing_dirs(self.profile.port_dirs, gui.root)
+            self.free = space.free_bytes(dirs[0]) if dirs else None
             self.state = "ready"
         except InstallerError as e:
             self.error, self.state = str(e), "error"
@@ -731,7 +919,10 @@ class ManagerScreen(Screen):
         def work():
             try:
                 freed = mgr.delete_port(port, self.profile, self.root)
+                self.history.forget_port(port.names)
                 self.ports = [p for p in self.ports if p is not port]
+                dirs = mgr.existing_dirs(self.profile.port_dirs, self.root)
+                self.free = space.free_bytes(dirs[0]) if dirs else None
                 self.pending = ("Удалено", [f"«{port.name}» удалён.", f"Освобождено: {mgr.format_size(freed)}"], OKC)
             except InstallerError as e:
                 self.pending = ("Не удалось удалить", [str(e)], ERR)
@@ -766,6 +957,10 @@ class ManagerScreen(Screen):
             lines = [f"Тип: {port.kind}",
                      f"Скрипт: {port.script or '—'}", f"Папка: {port.folder or '—'}",
                      f"Размер: {mgr.format_size(port.size)}", f"Дата: {mgr.format_date(port.mtime)}"]
+            if port.source:
+                src = port.source
+                lines += [f"Облако: {src.get('cloud') or src.get('url')}", f"Файл: {src.get('file') or '—'}",
+                          f"Установлен приложением: {src.get('date', '—')}"]
             gui.push(MessageScreen(port.name, lines))
         elif act == "x":
             if port.protected:
@@ -794,8 +989,8 @@ class ManagerScreen(Screen):
             return
         known = [p.size for p in self.ports if p.size is not None]
         total = mgr.format_size(sum(known)) + ("" if len(known) == len(self.ports) else "…")
-        gui.text(f"{self.fw_label} · портов: {len(self.ports)} · занято: {total} · {self.SORTS[self.sort][0]}",
-                 20, 58, gui.f_s, DIM, maxw=W - 40)
+        gui.text(f"{self.fw_label} · портов: {len(self.ports)} · занято: {total} · свободно: "
+                 f"{mgr.format_size(self.free)} · {self.SORTS[self.sort][0]}", 20, 58, gui.f_s, DIM, maxw=W - 40)
         if not self.ports:
             gui.text("Установленных портов не найдено.", 20, 100)
         kind_color = {"sh + папка": OKC}
@@ -806,7 +1001,8 @@ class ManagerScreen(Screen):
             sw = gui.be.text_size(gui.f_m, size)[0]
             gui.text(p.name, x, y + 3, maxw=w - sw - 12)
             gui.text(size, x + w - sw, y + 3, color=DIM if p.size is None else FG)
-            gui.text(f"{p.kind} · {mgr.format_date(p.mtime)}" + (" · это приложение" if p.protected else ""),
+            gui.text(f"{p.kind} · {mgr.format_date(p.mtime)}" + (" · это приложение" if p.protected else "")
+                     + (f" · {p.source.get('cloud') or 'облако'}" if p.source else ""),
                      x, y + 29, gui.f_s, DIM if p.protected else kind_color.get(p.kind, WARN), maxw=w)
         gui.list_view(len(self.ports), self.sel, 84, 52, item)
         if self.state == "busy":
@@ -832,6 +1028,7 @@ class Gui:
         self.be = backend
         self.cfw = env_cfw_name(root)
         self.f_s, self.f_m, self.f_l = backend.load_fonts(font_path or find_font(), (16, 20, 28))
+        self.history = History(Path(getattr(store, 'home', '.')) / 'installed.json')
         self.stack: List[Screen] = [MainMenu()]
         self.stack[0].on_show(self)
         self.running = True

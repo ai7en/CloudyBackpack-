@@ -14,6 +14,7 @@ else
   controlfolder="/roms/ports/PortMaster"
 fi
 
+export PM_CONTROLFOLDER="$controlfolder"
 source $controlfolder/control.txt
 [ -f "${controlfolder}/mod_${CFW_NAME}.txt" ] && source "${controlfolder}/mod_${CFW_NAME}.txt"
 
@@ -95,6 +96,7 @@ export PYTHONPATH="$GAMEDIR:$controlfolder/pylibs:$controlfolder/exlibs${PYTHONP
 export PYTHONDONTWRITEBYTECODE=1
 export SDL_GAMECONTROLLERCONFIG="$sdl_controllerconfig"
 export PM_INSTALLER_HOME="$GAMEDIR/data"
+export PM_SCRIPT_PATH="$(readlink -f "$0" 2>/dev/null || echo "$0")"
 export CFW_NAME
 
 echo "ssl: $($PYTHON_CMD -c 'import ssl;print(ssl.OPENSSL_VERSION)' 2>&1 | tail -1) curl: $(command -v curl || echo нет)"

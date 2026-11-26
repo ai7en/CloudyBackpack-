@@ -176,6 +176,10 @@ class TestGui(unittest.TestCase):
         self.assertTrue(Path(self.root + "/roms/ports/Game.sh").is_file())
 
     def test_install_error_is_shown(self):
+        from pm_installer.clouds.base import CloudProvider
+        patcher = mock.patch.object(CloudProvider, "RETRIES", 0)
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.st.clouds = [{"name": "Мёртвое", "url": "http://127.0.0.1:1/x.zip", "cloud": "direct"}]
         self.press("ok", "ok")
         self.wait_browse(self.g.top)
@@ -194,7 +198,7 @@ class TestGui(unittest.TestCase):
     def test_browse_error_then_retry(self):
         from pm_installer.errors import InvalidLinkError
         fake_inst = mock.Mock()
-        fake_inst.list_remote.side_effect = InvalidLinkError("Ссылка не найдена (404)")
+        fake_inst.open_dir.side_effect = InvalidLinkError("Ссылка не найдена (404)")
         with mock.patch.object(G, "PortInstaller", return_value=fake_inst):
             self.st.clouds = [{"name": "Мёртвое", "url": "https://x/y", "cloud": "auto"}]
             self.press("ok", "ok")
@@ -204,7 +208,7 @@ class TestGui(unittest.TestCase):
             self.assertIn("404", scr.error)
             self.press("ok")                            # повторить
             self.wait_browse(scr)
-            self.assertEqual(fake_inst.list_remote.call_count, 2)
+            self.assertEqual(fake_inst.open_dir.call_count, 2)
         self.press("back")
         self.assertIsInstance(self.g.top, G.CloudsScreen)
 
@@ -212,7 +216,7 @@ class TestGui(unittest.TestCase):
         from pm_installer.clouds import RemoteFile
         files = [RemoteFile(f"p{i}.zip", 1000 * i, {"folder": True, "display": f"d/p{i}.zip"}) for i in range(1, 4)]
         fake_inst = mock.Mock()
-        fake_inst.list_remote.return_value = (mock.Mock(), files)
+        fake_inst.open_dir.return_value = (mock.Mock(), [], files)
         with mock.patch.object(G, "PortInstaller", return_value=fake_inst):
             self.st.clouds = [{"name": "N", "url": "https://x/y", "cloud": "auto"}]
             self.press("ok", "ok")
@@ -220,11 +224,11 @@ class TestGui(unittest.TestCase):
             self.wait_browse(scr)
         self.assertEqual(scr.state, "ready")
         self.press("x", "down", "x")                   # отметить 1-й и 2-й
-        self.assertEqual(scr.marked, {0, 1})
+        self.assertEqual(set(scr.marked), {"d/p1.zip", "d/p2.zip"})
         self.press("y")                                # все
-        self.assertEqual(scr.marked, {0, 1, 2})
+        self.assertEqual(len(scr.marked), 3)
         self.press("y")                                # снять все
-        self.assertEqual(scr.marked, set())
+        self.assertEqual(scr.marked, {})
         self.press("x", "down", "down", "x")           # выделенная — 2-я; затем по кругу на 1-ю
         with mock.patch.object(G, "InstallScreen") as inst_cls:
             self.press("ok")
@@ -239,7 +243,7 @@ class TestGui(unittest.TestCase):
             def __init__(self, *a, **kw):
                 seen["cancel"] = kw["cancel"]
 
-            def install_remote(self, provider, files):
+            def install_remote(self, provider, files, source=None):
                 gate.wait(5)
                 seen["cancelled"] = seen["cancel"].is_set()
                 raise G.CancelledError("Установка отменена.")

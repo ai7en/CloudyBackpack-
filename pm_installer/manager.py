@@ -50,6 +50,12 @@ class InstalledPort:
     size: Optional[int] = None        # None — ещё считается
     mtime: float = 0.0
     protected: bool = False
+    source: Optional[dict] = None      # запись из истории установок (облако, файл, дата)
+
+    @property
+    def names(self) -> List[str]:
+        return [n for n in (self.name, self.folder.name if self.folder else None,
+                            self.script.name if self.script else None) if n]
 
     @property
     def kind(self) -> str:
@@ -87,7 +93,7 @@ def compute_size(port: InstalledPort) -> int:
     return n
 
 
-def _existing_dirs(candidates, root: str) -> List[Path]:
+def existing_dirs(candidates, root: str) -> List[Path]:
     out, seen = [], set()
     for c in candidates:
         p = rooted(c, root)
@@ -115,8 +121,8 @@ def referenced_folder(script: Path) -> Optional[str]:
 
 def scan(profile: FirmwareProfile, root: str = "") -> List[InstalledPort]:
     """Все порты в существующих папках прошивки. Размеры не считаются (см. compute_size)."""
-    script_dirs = _existing_dirs(profile.script_dirs, root)
-    port_dirs = _existing_dirs(profile.port_dirs, root)
+    script_dirs = existing_dirs(profile.script_dirs, root)
+    port_dirs = existing_dirs(profile.port_dirs, root)
     scripts: List[Path] = []
     folders: List[Path] = []
     for d in script_dirs:
@@ -173,7 +179,7 @@ def delete_port(port: InstalledPort, profile: FirmwareProfile, root: str = "") -
     if port.protected:
         raise InstallerError("Это приложение удалить нельзя — оно нужно для установки портов.")
     allowed = [os.path.realpath(d) for d in
-               _existing_dirs(list(profile.script_dirs) + list(profile.port_dirs), root)]
+               existing_dirs(list(profile.script_dirs) + list(profile.port_dirs), root)]
 
     def inside(p: Path) -> bool:
         parent = os.path.realpath(p.parent)

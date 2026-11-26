@@ -47,6 +47,6 @@ class MailRuCloud(CloudProvider):
         return [RemoteFile(tail if is_archive_name(tail) else "", None,
                            {"weblink": weblink, "base": base})]
 
-    def open_stream(self, remote: RemoteFile):
+    def open_stream(self, remote: RemoteFile, start: int = 0):
         url = remote.meta["base"].rstrip("/") + "/" + urllib.parse.quote(remote.meta["weblink"], safe="/")
-        return self._request("GET", url, stream=True)
+        return self._request("GET", url, stream=True, headers=self.range_headers(start))

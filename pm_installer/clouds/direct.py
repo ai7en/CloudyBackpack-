@@ -21,8 +21,8 @@ class DirectLink(CloudProvider):
         name = safe_filename(last) if "." in last else ""
         return [RemoteFile(name, None, {"url": url})]
 
-    def open_stream(self, remote: RemoteFile):
-        r = self._request("GET", remote.meta["url"], stream=True)
+    def open_stream(self, remote: RemoteFile, start: int = 0):
+        r = self._request("GET", remote.meta["url"], stream=True, headers=self.range_headers(start))
         if r.headers.get("Content-Type", "").lower().startswith("text/html"):
             r.close()
             raise InvalidLinkError("По ссылке открывается веб-страница, а не файл. Если это ссылка на облако "

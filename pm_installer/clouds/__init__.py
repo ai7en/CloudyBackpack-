@@ -2,7 +2,7 @@
 from typing import Dict, List, Optional, Tuple, Type
 
 from ..errors import InstallerError, InvalidLinkError
-from .base import CloudProvider, RemoteFile
+from .base import CloudProvider, RemoteDir, RemoteFile
 
 _REGISTRY: Dict[str, Type[CloudProvider]] = {}
 
@@ -47,4 +47,4 @@ def get_provider(url: str, kind: str = "auto", session=None) -> CloudProvider:
 # Импорт после определения register(); direct — последним (запасной вариант для http(s)-ссылок)
 from . import yandex, gdrive, mailru, direct  # noqa: E402,F401
 
-__all__ = ["normalize_url", "CloudProvider", "RemoteFile", "register", "available_providers", "get_provider"]
+__all__ = ["normalize_url", "CloudProvider", "RemoteFile", "RemoteDir", "register", "available_providers", "get_provider"]

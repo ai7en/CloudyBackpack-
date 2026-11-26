@@ -48,6 +48,19 @@ def main() -> int:
             zi.compress_type = zipfile.ZIP_DEFLATED
             zi.external_attr = (stat.S_IFREG | mode) << 16
             z.writestr(zi, src.read_bytes())
+    if "--release" in sys.argv[1:]:
+        import hashlib
+        import json
+        sys.path.insert(0, str(BASE))
+        from pm_installer import __version__
+        rel = BASE / "release"
+        rel.mkdir(exist_ok=True)
+        (rel / OUT.name).write_bytes(OUT.read_bytes())
+        notes = (BASE / "release_notes.txt").read_text("utf-8").strip() if (BASE / "release_notes.txt").exists() else ""
+        (rel / "VERSION.json").write_text(json.dumps(
+            {"version": __version__, "zip": OUT.name, "sha256": hashlib.sha256(OUT.read_bytes()).hexdigest(),
+             "notes": notes}, ensure_ascii=False, indent=2) + "\n", "utf-8")
+        print(f"release/VERSION.json: {__version__}")
     names = zipfile.ZipFile(OUT).namelist()
     print(f"{OUT}: {len(names)} файлов, {OUT.stat().st_size // 1024} КБ")
     return 0

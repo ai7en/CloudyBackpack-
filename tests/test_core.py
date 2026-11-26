@@ -321,6 +321,8 @@ class TestProviders(unittest.TestCase):
         from pm_installer.clouds import RemoteFile
         inst = PortInstaller.__new__(PortInstaller)
         inst.cancel = None
+        inst.settings = Settings()
+        inst.history = None
         one = [RemoteFile("a.zip", 1, {"folder": True, "display": "x/a.zip"})]
         asked = []
         inst.list_remote = lambda url=None: (mock.Mock(download=mock.Mock(side_effect=RuntimeError("stop"))), one)
@@ -434,6 +436,10 @@ class TestEndToEndHttp(Base):
 
     def test_connection_refused_is_network_error(self):
         from pm_installer.errors import NetworkError
+        from pm_installer.clouds.base import CloudProvider
+        patcher = mock.patch.object(CloudProvider, "RETRIES", 0)
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.httpd.shutdown()
         self.httpd.server_close()
         with self.assertRaises(NetworkError):

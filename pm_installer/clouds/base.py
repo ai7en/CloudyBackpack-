@@ -3,6 +3,7 @@ import logging
 import os
 import re
 import threading
+import time
 import urllib.parse
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -27,6 +28,13 @@ class RemoteFile:
     name: str = ""                 # может быть пустым — тогда имя берётся из заголовков при загрузке
     size: Optional[int] = None
     meta: dict = field(default_factory=dict)   # служебные данные провайдера
+
+
+@dataclass
+class RemoteDir:
+    name: str = ""
+    path: Optional[str] = None                 # идентификатор папки у провайдера
+    meta: dict = field(default_factory=dict)   # prefix — относительный путь для имён файлов внутри
 
 
 def filename_from_headers(resp) -> str:
@@ -70,9 +78,18 @@ class CloudProvider(ABC):
     def list_files(self, url: str) -> List[RemoteFile]:
         """Файлы, доступные по публичной ссылке (для папки — её архивы)."""
 
+    def list_dir(self, url: str, path: Optional[str] = None,
+                 prefix: str = "") -> Tuple[List[RemoteDir], List[RemoteFile]]:
+        """Содержимое одной папки: (подпапки, файлы). По умолчанию — плоский список без папок."""
+        return [], self.list_files(url)
+
     @abstractmethod
-    def open_stream(self, remote: RemoteFile) -> requests.Response:
-        """Открывает потоковый ответ с содержимым файла."""
+    def open_stream(self, remote: RemoteFile, start: int = 0) -> requests.Response:
+        """Потоковый ответ с содержимым файла; start > 0 — запросить с этого байта (докачка, заголовок Range)."""
+
+    @staticmethod
+    def range_headers(start: int) -> Optional[dict]:
+        return {"Range": f"bytes={int(start)}-"} if start > 0 else None
 
     # ------------------------------------------------------------ общее
 
@@ -99,27 +116,85 @@ class CloudProvider(ABC):
             raise NetworkError(f"Сервер вернул ошибку HTTP {r.status_code}.")
         return r
 
+    RETRIES = 3
+
+    @staticmethod
+    def _identity(remote: RemoteFile) -> str:
+        m = remote.meta
+        return "|".join(str(x) for x in (remote.size, m.get("md5"), m.get("modified"), m.get("path"), m.get("id")))
+
     def download(self, remote: RemoteFile, dest_dir: Path, progress: Optional[ProgressCB] = None,
-                 cancel: Optional[threading.Event] = None) -> Path:
+                 cancel: Optional[threading.Event] = None,
+                 on_retry: Optional[Callable[[int, int, str], None]] = None) -> Path:
+        """Скачивает файл. Обрыв связи — до RETRIES повторов с докачкой (Range) из .part;
+        недокачанный .part остаётся на диске и подхватывается при следующей попытке."""
         dest_dir = Path(dest_dir)
         try:
             dest_dir.mkdir(parents=True, exist_ok=True)
         except OSError as e:
             raise wrap_oserror(e, dest_dir) from e
-        resp = self.open_stream(remote)
-        part: Optional[Path] = None
+        attempt = 0
+        while True:
+            try:
+                return self._download_once(remote, dest_dir, progress, cancel)
+            except NetworkError as e:
+                attempt += 1
+                if attempt > self.RETRIES or (cancel is not None and cancel.is_set()):
+                    raise
+                log.warning("Повтор загрузки %d/%d: %s", attempt, self.RETRIES, e)
+                if on_retry:
+                    on_retry(attempt, self.RETRIES, str(e))
+                for _ in range(attempt * 4):               # пауза 2, 4, 6 с, прерываемая отменой
+                    if cancel is not None and cancel.is_set():
+                        raise CancelledError("Загрузка отменена.")
+                    time.sleep(0.5)
+
+    def _open_resumable(self, remote: RemoteFile, start: int):
+        """→ (ответ, с какого байта реально идёт содержимое)."""
         try:
-            name = safe_filename(remote.name or filename_from_headers(resp)
-                                 or urllib.parse.urlparse(resp.url).path.rsplit("/", 1)[-1])
+            resp = self.open_stream(remote, start) if start else self.open_stream(remote)
+        except NetworkError as e:
+            if start and "416" in str(e):                   # сервер: диапазон за пределами — начинаем заново
+                return self.open_stream(remote), 0
+            raise
+        if start and resp.status_code != 206:               # Range проигнорирован — придёт весь файл
+            return resp, 0
+        return resp, start
+
+    def _download_once(self, remote, dest_dir, progress, cancel) -> Path:
+        ident = self._identity(remote)
+        part = tgt = marker = None
+        start = 0
+        if remote.name:                                     # имя известно заранее → можно докачивать
+            tgt = dest_dir / safe_filename(remote.name)
+            part = dest_dir / (tgt.name + ".part")
+            marker = dest_dir / (tgt.name + ".part.id")
             try:
-                total = remote.size or int(resp.headers.get("Content-Length") or 0) or None
-            except ValueError:
-                total = None
-            target = dest_dir / name
-            part = dest_dir / (name + ".part")
-            done = 0
+                if part.is_file() and marker.read_text("utf-8") == ident and \
+                        (not remote.size or part.stat().st_size < remote.size):
+                    start = part.stat().st_size
+            except OSError:
+                start = 0
+        resp, start = self._open_resumable(remote, start)
+        keep = False
+        try:
+            if tgt is None:
+                name = safe_filename(filename_from_headers(resp)
+                                     or urllib.parse.urlparse(resp.url).path.rsplit("/", 1)[-1])
+                tgt = dest_dir / name
+                part = dest_dir / (name + ".part")
+                marker = dest_dir / (name + ".part.id")
+            total = remote.size
+            if not total:
+                m = re.search(r"/(\d+)\s*$", resp.headers.get("Content-Range", ""))
+                try:
+                    total = int(m.group(1)) if m else (int(resp.headers.get("Content-Length") or 0) + start) or None
+                except ValueError:
+                    total = None
+            done = start
             try:
-                with open(part, "wb") as f:
+                marker.write_text(ident, "utf-8")
+                with open(part, "ab" if start else "wb") as f:
                     for chunk in resp.iter_content(CHUNK):
                         if cancel is not None and cancel.is_set():
                             raise CancelledError("Загрузка отменена.")
@@ -129,19 +204,27 @@ class CloudProvider(ABC):
                             if progress:
                                 progress(done, total)
             except requests.RequestException as e:
+                keep = True                                  # .part остаётся для докачки
                 log.warning("Обрыв загрузки: %r", e)
                 raise NetworkError("Загрузка оборвалась: " + describe_network_error(e, getattr(resp, "url", ""))) from e
             except OSError as e:
                 raise wrap_oserror(e, part) from e
             if total and done < total and not resp.headers.get("Content-Encoding"):
+                keep = True
                 raise NetworkError(f"Загрузка оборвалась ({done} из {total} байт).")
-            os.replace(part, target)
+            os.replace(part, tgt)
             part = None
-            return target
+            return tgt
         finally:
             resp.close()
-            if part is not None:
+            if part is not None and not keep:
+                for f in (part, marker):
+                    try:
+                        f.unlink()
+                    except OSError:
+                        pass
+            if part is None and marker is not None:
                 try:
-                    part.unlink()
+                    marker.unlink()
                 except OSError:
                     pass

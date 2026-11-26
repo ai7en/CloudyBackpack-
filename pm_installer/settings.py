@@ -28,12 +28,16 @@ class Settings:
     temp_dir: str = ""              # "" = <data>/tmp (на SD-карте, не в RAM-tmpfs)
     conflict_policy: str = "ask"    # ask | overwrite | skip | backup
     swap_ab: bool = False           # поменять местами A и B на геймпаде
+    update_url: str = ""            # "" = адрес по умолчанию (release/VERSION.json в репозитории)
+    keep_downloads: bool = False    # хранить скачанные архивы (кэш), чтобы не качать повторно
     clouds: list = field(default_factory=list)   # [{"name": ..., "url": ..., "cloud": "auto|yandex|..."}]
 
     def normalize(self) -> "Settings":
         if self.conflict_policy not in CONFLICT_POLICIES:
             self.conflict_policy = "ask"
         self.swap_ab = bool(self.swap_ab)
+        self.keep_downloads = bool(self.keep_downloads)
+        self.update_url = (self.update_url or "").strip()
         self.url = (self.url or "").strip()
         self.cloud = self.cloud or "auto"
         self.firmware = self.firmware or "auto"
